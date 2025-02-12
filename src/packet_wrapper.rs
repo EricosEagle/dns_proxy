@@ -39,6 +39,12 @@ impl From<Vec<u8>> for DnsPacketWrapper {
     }
 }
 
+impl Into<Vec<u8>> for DnsPacketWrapper {
+    fn into(self) -> Vec<u8> {
+        self.buf
+    }
+}
+
 // Couldn't store these references in the struct because of lifetime issues
 // so I made them into functions
 impl DnsPacketWrapper {

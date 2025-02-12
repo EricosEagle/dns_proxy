@@ -80,7 +80,6 @@ fn relay_to_server(
     request_packet: DnsPacketWrapper,
     interface_index: u32,
 ) {
-    log::debug!("In relay_to_server");
     let payload = match request_packet.udp_payload() {
         Ok(payload) => payload,
         Err(e) => {
@@ -105,7 +104,7 @@ fn relay_to_server(
         }
     };
 
-    let inject_packet = match create_windivert_packet(inject_packet_data, interface_index) {
+    let inject_packet = match create_windivert_packet(inject_packet_data, interface_index, false) {
         Ok(packet) => packet,
         Err(e) => {
             log::error!("Failed to create WindDivertPacket: {}", e);
@@ -188,12 +187,12 @@ fn main() {
             && !hosts_in_blacklist(&cfg.hosts_blacklist, &dns_packet.questions)
         {
             let wdt_ref = Arc::clone(&windvt);
-            let remote_dns_address = cfg.remote_dns_address.clone();
             log::debug!(
                 "Relaying packet to the external DNS server, hosts: {:?}",
                 &dns_packet.questions
             );
 
+            // TODO: Find a way to reinject original packet on relay_to_server / divert_to_server errors
             pool.execute(move || {
                 relay_to_server(
                     wdt_ref,
@@ -206,11 +205,9 @@ fn main() {
         }
 
         // Reinject non-relayed packets
-        windvt
-            .lock()
-            .unwrap()
-            .send(&packet)
-            .expect("Failed to reinject non-relay packet");
-        log::debug!("Reinjected non-relay packet");
+        match windvt.lock().unwrap().send(&packet) {
+            Ok(_) => log::debug!("Successfully resent received packet"),
+            Err(e) => log::error!("Failed to resend received packet: {}", e),
+        }
     }
 }
