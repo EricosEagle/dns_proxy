@@ -8,12 +8,8 @@ pub struct DnsPacketWrapper {
 // Since the wrapper hasn't implemented WinDivertHelperParsePacket
 // it is easier to parse the packet ourselves
 fn get_udp_packet_slices<'a>(buf: &'a [u8]) -> Result<SlicedPacket<'a>, String> {
-    let slices = match SlicedPacket::from_ip(&buf) {
-        Ok(slices) => slices,
-        Err(e) => {
-            return Err(format!("Failed to parse packet: {}", e));
-        }
-    };
+    let slices = SlicedPacket::from_ip(&buf)
+        .map_err(|e| format!("Failed to parse packet: {}", e))?;
 
     log::trace!("Raw Packet: {:#x?}", buf);
     log::trace!("Net Slice: {:?}", slices.net);

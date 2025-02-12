@@ -9,6 +9,7 @@ use std::net::{SocketAddrV4, UdpSocket};
 use std::sync::{Arc, Mutex};
 
 use etherparse::{NetSlice, PacketBuilder, TransportSlice};
+use threadpool::ThreadPool;
 
 const CONFIG_PATH: &str = "config.json";
 const PACKET_FILTER_TEMPLATE: &str = "(outbound or loopback) and ip and udp.DstPort == 53 and udp.PayloadLength > {DNS_HEADER_SIZE} and ip.DstAddr != {remote_dns_server}";
@@ -127,6 +128,71 @@ fn relay_to_server(
     }
 }
 
+fn build_diverted_packet<'a>(
+    packet_buf: Vec<u8>,
+    remote_dns_address: SocketAddrV4,
+) -> Result<Vec<u8>, String> {
+    let packet_wrapper = DnsPacketWrapper::from(packet_buf);
+
+    let slices = packet_wrapper.slices()?;
+
+    let NetSlice::Ipv4(net) = slices.net.unwrap() else {
+        return Err("Not IPv4 packet".to_string());
+    };
+
+    let TransportSlice::Udp(udp) = slices.transport.unwrap() else {
+        return Err("Not UDP packet".to_string());
+    };
+
+    // Build packet with the remote DNS server as the destination
+    let response = PacketBuilder::ipv4(
+        net.header().source(),
+        remote_dns_address.ip().octets(),
+        net.header().ttl(),
+    )
+    .udp(udp.source_port(), remote_dns_address.port());
+
+    let mut result = Vec::<u8>::with_capacity(response.size(udp.payload().len()));
+    response
+        .write(&mut result, udp.payload())
+        .map_err(|e| e.to_string())?;
+
+    log::debug!("Built diverted packet data: {:?}", result);
+
+    Ok(result)
+}
+
+fn divert_dns_query(
+    windvt: Arc<Mutex<WinDivert<NetworkLayer>>>,
+    remote_dns_address: SocketAddrV4,
+    packet: Vec<u8>,
+    interface_index: u32,
+) {
+    let diverted_packet =
+    match build_diverted_packet( packet, remote_dns_address) {
+        Ok(packet) => packet,
+        Err(e) => {
+            log::error!("Failed to build diverted packet: {}", e);
+            return;
+        }
+    };
+
+    let win_diverted_packet =
+        match create_windivert_packet(diverted_packet, interface_index, true) {
+            Ok(packet) => packet,
+            Err(e) => {
+                log::error!("Failed to create WinDivertPacket: {}", e);
+                return;
+            }
+        };
+
+    match windvt.lock().unwrap().send(&win_diverted_packet) {
+        Ok(_) => log::debug!("Successfully sent diverted packet"),
+        Err(e) => log::error!("Failed to send diverted packet: {}", e),
+    }
+}
+
+// TODO: Add additional hook to capture return traffic from the remote dns server
 fn main() {
     env_logger::init();
     let cfg: Config = read_config(CONFIG_PATH);
@@ -156,7 +222,7 @@ fn main() {
         }
     };
 
-    let pool = threadpool::ThreadPool::new(num_cpus::get());
+    let pool = ThreadPool::new(num_cpus::get());
     let windvt = Arc::new(Mutex::new(windvt));
     loop {
         let mut buf = [0u8; MAX_PACKET_SIZE];
@@ -188,16 +254,16 @@ fn main() {
         {
             let wdt_ref = Arc::clone(&windvt);
             log::debug!(
-                "Relaying packet to the external DNS server, hosts: {:?}",
+                "Diverting packet to the external DNS server, hosts: {:?}",
                 &dns_packet.questions
             );
 
             // TODO: Find a way to reinject original packet on relay_to_server / divert_to_server errors
             pool.execute(move || {
-                relay_to_server(
+                divert_dns_query(
                     wdt_ref,
-                    remote_dns_address,
-                    parsed_packet,
+                    cfg.remote_dns_address,
+                    parsed_packet.into(),
                     packet.address.interface_index(),
                 )
             });

@@ -1,8 +1,9 @@
 use windivert::packet::WinDivertPacket;
 use windivert::{address::WinDivertAddress, layer::NetworkLayer};
 
-fn initialise_windivert_address(interface_index: u32, is_outbound: bool) -> WinDivertAddress<NetworkLayer> {
-    let mut address = unsafe { WinDivertAddress::<NetworkLayer>::new() };
+fn initialise_windivert_address(interface_index: u32, is_outbound: bool) -> Result<WinDivertAddress<NetworkLayer>, String> {
+    let mut address = unsafe { WinDivertAddress::<NetworkLayer>::new() }
+        .map_err(|e| format!("Failed to initialize WinDivertAddress: {}", e))?;
 
     // Set address properties
     // According to the docs, Most address fields are ignored by WinDivertSend().
@@ -16,7 +17,7 @@ fn initialise_windivert_address(interface_index: u32, is_outbound: bool) -> WinD
     address.set_interface_index(interface_index);
     // Didn't find a way to access the subinterface index, hopefully it's not needed
 
-    address
+    Ok(address)
 }
 
 pub fn create_windivert_packet<'a>(
@@ -28,9 +29,10 @@ pub fn create_windivert_packet<'a>(
         return Err("Packet data is empty".to_string());
     }
 
-    let mut packet = unsafe { WinDivertPacket::<NetworkLayer>::new(data) };
+    let mut packet = unsafe { WinDivertPacket::<NetworkLayer>::new(data) }
+        .map_err(|e| format!("Failed to create WinDivertPacket: {}", e))?;
 
-    let address = initialise_windivert_address(interface_index, is_outbound);
+    let address = initialise_windivert_address(interface_index, is_outbound)?;
     packet.address = address;
 
     Ok(packet)
