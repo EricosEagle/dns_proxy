@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 
+use windivert::error::WinDivertError;
 use windivert::packet::WinDivertPacket;
 use windivert::{address::WinDivertAddress, layer::NetworkLayer};
 use windivert_sys::ChecksumFlags;
@@ -26,12 +27,16 @@ pub fn create_windivert_packet_from(
     data: Vec<u8>,
     windivert_packet: &WinDivertPacket<'_, NetworkLayer>,
     is_outbound: bool,
-) -> Result<WinDivertPacket<'static, NetworkLayer>, String> {
+) -> Result<WinDivertPacket<'static, NetworkLayer>, WinDivertError> {
     let mut packet = windivert_packet.clone();
     packet.data = Cow::from(data);
-
     packet.address.set_outbound(is_outbound);
-    packet.recalculate_checksums(ChecksumFlags::default()).map_err(|e| e.to_string())?;
+    
+    // DEBUG
+    packet.recalculate_checksums(ChecksumFlags::default())?;
+
+    log::debug!("Packet address: {:?}", packet.address);
+    log::debug!("Packet: {:?}", packet);
 
     Ok(packet.into_owned())
 }

@@ -79,13 +79,16 @@ fn build_injected_packet(
 async fn relay_to_server(
     windvt: Arc<Mutex<WinDivert<NetworkLayer>>>,
     remote_dns_address: SocketAddrV4,
-    request_packet: DnsPacketWrapper,
-    windivert_packet: WinDivertPacket<'static, NetworkLayer>,
+    request_wrapper: DnsPacketWrapper,
+    request_packet: WinDivertPacket<'static, NetworkLayer>,
 ) {
-    let payload = match request_packet.udp_payload() {
+    let payload = match request_wrapper.udp_payload() {
         Ok(payload) => payload,
         Err(e) => {
             log::error!("Failed to get UDP payload: {}", e);
+            if let Err(e)  = windvt.lock().await.send(&request_packet) {
+                log::error!("Failed to reinject packet: {}", e);
+            }
             return;
         }
     };
@@ -94,22 +97,31 @@ async fn relay_to_server(
         Ok(reply) => reply,
         Err(e) => {
             log::error!("Failed to send query: {}", e);
+            if let Err(e)  = windvt.lock().await.send(&request_packet) {
+                log::error!("Failed to reinject packet: {}", e);
+            }
             return;
         }
     };
 
-    let inject_packet_data = match build_injected_packet(&request_packet, reply) {
+    let inject_packet_data = match build_injected_packet(&request_wrapper, reply) {
         Ok(packet) => packet,
         Err(e) => {
             log::error!("Failed to build injected packet: {}", e);
+            if let Err(e)  = windvt.lock().await.send(&request_packet) {
+                log::error!("Failed to reinject packet: {}", e);
+            }
             return;
         }
     };
 
-    let inject_packet = match create_windivert_packet_from(inject_packet_data, &windivert_packet, false) {
+    let inject_packet = match create_windivert_packet_from(inject_packet_data, &request_packet, false) {
         Ok(packet) => packet,
         Err(e) => {
             log::error!("Failed to create WindDivertPacket: {}", e);
+            if let Err(e)  = windvt.lock().await.send(&request_packet) {
+                log::error!("Failed to reinject packet: {}", e);
+            }
             return;
         }
     };
@@ -141,7 +153,7 @@ async fn main() {
             &cfg.remote_dns_address.port().to_string(),
         )
         .replace("{DNS_HEADER_SIZE}", &DNS_HEADER_SIZE.to_string());
-    log::debug!("Packet filter: {}", packet_filter);
+    log::trace!("Packet filter: {}", packet_filter);
 
     let windvt = match WinDivert::network(
         packet_filter,
@@ -193,7 +205,6 @@ async fn main() {
                 &dns_packet.questions
             );
 
-            // TODO: Find a way to reinject original packet on relay_to_server / divert_to_server errors
             tokio::spawn(async move {
                 relay_to_server(
                     wdt_ref,
