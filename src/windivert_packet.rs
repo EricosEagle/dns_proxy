@@ -1,5 +1,8 @@
+use std::borrow::Cow;
+
 use windivert::packet::WinDivertPacket;
 use windivert::{address::WinDivertAddress, layer::NetworkLayer};
+use windivert_sys::ChecksumFlags;
 
 fn initialise_windivert_address(interface_index: u32, is_outbound: bool) -> WinDivertAddress<NetworkLayer> {
     let mut address = unsafe { WinDivertAddress::<NetworkLayer>::new() };
@@ -19,19 +22,16 @@ fn initialise_windivert_address(interface_index: u32, is_outbound: bool) -> WinD
     address
 }
 
-pub fn create_windivert_packet<'a>(
+pub fn create_windivert_packet_from(
     data: Vec<u8>,
-    interface_index: u32,
+    windivert_packet: &WinDivertPacket<'_, NetworkLayer>,
     is_outbound: bool,
-) -> Result<WinDivertPacket<'a, NetworkLayer>, String> {
-    if data.is_empty() {
-        return Err("Packet data is empty".to_string());
-    }
+) -> Result<WinDivertPacket<'static, NetworkLayer>, String> {
+    let mut packet = windivert_packet.clone();
+    packet.data = Cow::from(data);
 
-    let mut packet = unsafe { WinDivertPacket::<NetworkLayer>::new(data) };
+    packet.address.set_outbound(is_outbound);
+    packet.recalculate_checksums(ChecksumFlags::default()).map_err(|e| e.to_string())?;
 
-    let address = initialise_windivert_address(interface_index, is_outbound);
-    packet.address = address;
-
-    Ok(packet)
+    Ok(packet.into_owned())
 }

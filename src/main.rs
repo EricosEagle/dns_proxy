@@ -80,7 +80,7 @@ async fn relay_to_server(
     windvt: Arc<Mutex<WinDivert<NetworkLayer>>>,
     remote_dns_address: SocketAddrV4,
     request_packet: DnsPacketWrapper,
-    interface_index: u32,
+    windivert_packet: WinDivertPacket<'static, NetworkLayer>,
 ) {
     let payload = match request_packet.udp_payload() {
         Ok(payload) => payload,
@@ -106,7 +106,7 @@ async fn relay_to_server(
         }
     };
 
-    let inject_packet = match create_windivert_packet(inject_packet_data, interface_index, false) {
+    let inject_packet = match create_windivert_packet_from(inject_packet_data, &windivert_packet, false) {
         Ok(packet) => packet,
         Err(e) => {
             log::error!("Failed to create WindDivertPacket: {}", e);
@@ -165,6 +165,8 @@ async fn main() {
                 continue;
             }
         };
+
+        let packet = packet.into_owned();
 
         let parsed_packet = DnsPacketWrapper::from(packet.data.to_vec());
         let dns_packet = match parsed_packet.dns_packet() {
