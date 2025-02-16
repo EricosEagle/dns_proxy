@@ -178,23 +178,38 @@ async fn main() {
         WinDivertPacket<'static, NetworkLayer>,
     )>(MAX_CONCURRENT_TASKS);
 
-    // Context for using poll_recv_many
     let waker = futures::task::noop_waker();
     let mut cx = std::task::Context::from_waker(&waker);
 
+    main_loop(&cfg, &windvt, &tx, &mut rx, &mut cx).await;
+}
+
+async fn main_loop(
+    cfg: &Config,
+    windvt: &WinDivert<NetworkLayer>,
+    tx: &mpsc::Sender<(
+        Result<WinDivertPacket<'static, NetworkLayer>, String>,
+        WinDivertPacket<'static, NetworkLayer>,
+    )>,
+    rx: &mut mpsc::Receiver<(
+        Result<WinDivertPacket<'static, NetworkLayer>, String>,
+        WinDivertPacket<'static, NetworkLayer>,
+    )>,
+    cx: &mut std::task::Context<'_>,
+) {
     loop {
         let mut results: Vec<(
             Result<WinDivertPacket<'static, NetworkLayer>, String>,
             WinDivertPacket<'static, NetworkLayer>,
         )> = Vec::new();
-        match rx.poll_recv_many(&mut cx, &mut results, MAX_CONCURRENT_TASKS) {
+        match rx.poll_recv_many(cx, &mut results, MAX_CONCURRENT_TASKS) {
             Poll::Pending => log::debug!("No packets to inject"),
             Poll::Ready(0) => {
                 log::error!("Channel closed, aborting");
                 break;
             }
             Poll::Ready(_) => {
-                inject_packets(&windvt, results).await;
+                inject_packets(windvt, results).await;
             }
         }
 
@@ -209,59 +224,75 @@ async fn main() {
 
         let packet = packet.into_owned();
 
-        let parsed_packet = match DnsPacketWrapper::new(packet.data.to_vec()) {
-            Ok(parsed_packet) => parsed_packet,
-            Err(e) => {
-                log::error!("Failed to parse packet: {}", e);
-                windvt
-                    .send(&packet)
-                    .expect("Failed to reinject non-dns packet");
-                continue;
-            }
-        };
-
-        let dns_packet = match parsed_packet.dns_wrapper() {
-            Ok(dns_packet) => dns_packet,
-            Err(e) => {
-                log::error!("Failed to parse DNS packet: {}", e);
-                windvt
-                    .send(&packet)
-                    .expect("Failed to reinject non-dns packet");
-                continue;
-            }
-        };
-
-        if !dns_packet.header.query || dns_packet.header.questions <= 0 {
-            log::warn!("Received non-query packet, reinjecting");
-            match windvt.send(&packet) {
-                Ok(_) => log::debug!("Successfully resent non-query packet"),
-                Err(e) => log::error!("Failed to resend non-query packet: {}", e),
-            }
-            continue;
-        }
-
-        if !hosts_in_blacklist(&cfg.hosts_blacklist, &dns_packet.questions) {
-            let remote_dns_address = cfg.remote_dns_address;
-            log::info!(
-                "Relaying packet to the external DNS server, Source port: {}, hosts: {:?}",
-                parsed_packet.source_port(),
-                &dns_packet.questions
-            );
-
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                let res = relay_to_server(remote_dns_address, parsed_packet, &packet);
-                tx.send((res.await, packet))
-                    .await
-                    .expect("Failed to send injected packet over channel");
-            });
-            continue;
-        }
-
-        // Reinject non-relayed packets
-        match windvt.send(&packet) {
-            Ok(_) => log::debug!("Successfully resent blacklisted packet"),
-            Err(e) => log::error!("Failed to resend blacklisted packet: {}", e),
+        if let Err(e) = process_packet(cfg, windvt, tx, packet).await {
+            log::error!("Error processing packet: {}", e);
         }
     }
+}
+
+async fn process_packet(
+    cfg: &Config,
+    windvt: &WinDivert<NetworkLayer>,
+    tx: &mpsc::Sender<(
+        Result<WinDivertPacket<'static, NetworkLayer>, String>,
+        WinDivertPacket<'static, NetworkLayer>,
+    )>,
+    packet: WinDivertPacket<'static, NetworkLayer>,
+) -> Result<(), String> {
+    let parsed_packet = match DnsPacketWrapper::new(packet.data.to_vec()) {
+        Ok(parsed_packet) => parsed_packet,
+        Err(e) => {
+            log::error!("Failed to parse packet: {}", e);
+            windvt
+                .send(&packet)
+                .expect("Failed to reinject non-dns packet");
+            return Err("Failed to parse packet".to_string());
+        }
+    };
+
+    let dns_packet = match parsed_packet.dns_wrapper() {
+        Ok(dns_packet) => dns_packet,
+        Err(e) => {
+            log::error!("Failed to parse DNS packet: {}", e);
+            windvt
+                .send(&packet)
+                .expect("Failed to reinject non-dns packet");
+            return Err("Failed to parse DNS packet".to_string());
+        }
+    };
+
+    if !dns_packet.header.query || dns_packet.header.questions <= 0 {
+        log::warn!("Received non-query packet, reinjecting");
+        match windvt.send(&packet) {
+            Ok(_) => log::debug!("Successfully resent non-query packet"),
+            Err(e) => log::error!("Failed to resend non-query packet: {}", e),
+        }
+        return Ok(());
+    }
+
+    if !hosts_in_blacklist(&cfg.hosts_blacklist, &dns_packet.questions) {
+        let remote_dns_address = cfg.remote_dns_address;
+        log::info!(
+            "Relaying packet to the external DNS server, Source port: {}, hosts: {:?}",
+            parsed_packet.source_port(),
+            &dns_packet.questions
+        );
+
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let res = relay_to_server(remote_dns_address, parsed_packet, &packet);
+            tx.send((res.await, packet))
+                .await
+                .expect("Failed to send injected packet over channel");
+        });
+        return Ok(());
+    }
+
+    // Reinject non-relayed packets
+    match windvt.send(&packet) {
+        Ok(_) => log::debug!("Successfully resent blacklisted packet"),
+        Err(e) => log::error!("Failed to resend blacklisted packet: {}", e),
+    }
+
+    Ok(())
 }
