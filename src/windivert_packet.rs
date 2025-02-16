@@ -1,14 +1,14 @@
 use std::borrow::Cow;
 
 use windivert::error::WinDivertError;
-use windivert::packet::WinDivertPacket;
 use windivert::layer::NetworkLayer;
+use windivert::packet::WinDivertPacket;
 
 pub fn create_windivert_packet_from(
     data: Vec<u8>,
     windivert_packet: &WinDivertPacket<'_, NetworkLayer>,
     is_outbound: bool,
-    is_imposter: bool
+    is_imposter: bool,
 ) -> Result<WinDivertPacket<'static, NetworkLayer>, WinDivertError> {
     log::trace!("Source packet: {:?}", windivert_packet);
 

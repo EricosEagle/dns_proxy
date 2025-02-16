@@ -1,5 +1,5 @@
-use std::net::IpAddr;
 use etherparse::{NetSlice, SlicedPacket, TransportSlice};
+use std::net::IpAddr;
 
 #[derive(Clone, Debug)]
 pub struct DnsPacketWrapper {
@@ -20,8 +20,10 @@ fn get_udp_packet_slices<'a>(buf: &'a [u8]) -> Result<SlicedPacket<'a>, String> 
         }
     };
 
-    if !matches!(slices.net, Some(NetSlice::Ipv4(_)) | Some(NetSlice::Ipv6(_)))
-        || !matches!(slices.transport, Some(TransportSlice::Udp(_)))
+    if !matches!(
+        slices.net,
+        Some(NetSlice::Ipv4(_)) | Some(NetSlice::Ipv6(_))
+    ) || !matches!(slices.transport, Some(TransportSlice::Udp(_)))
     {
         return Err("Packet is not IPv4/IPv6 or UDP".to_string());
     }
@@ -29,9 +31,7 @@ fn get_udp_packet_slices<'a>(buf: &'a [u8]) -> Result<SlicedPacket<'a>, String> 
     Ok(slices)
 }
 
-fn dns_wrapper_from_payload<'a>(
-    payload: &'a [u8],
-) -> Result<dns_parser::Packet<'a>, String> {
+fn dns_wrapper_from_payload<'a>(payload: &'a [u8]) -> Result<dns_parser::Packet<'a>, String> {
     dns_parser::Packet::parse(payload).map_err(|e| e.to_string())
 }
 
@@ -46,7 +46,7 @@ impl DnsPacketWrapper {
     pub fn new<T: Into<Vec<u8>>>(buf: T) -> Result<Self, String> {
         let buf = buf.into();
         let slices = get_udp_packet_slices(&buf)?;
-        
+
         let source_ip = match slices.net {
             Some(NetSlice::Ipv4(ref ipv4)) => IpAddr::V4(ipv4.header().source_addr()),
             Some(NetSlice::Ipv6(ref ipv6)) => IpAddr::V6(ipv6.header().source_addr()),
@@ -66,7 +66,13 @@ impl DnsPacketWrapper {
 
         let udp_payload = udp_payload_from_slices(&slices)?.to_vec();
 
-        Ok(Self { source_ip, dest_ip, source_port, dest_port, udp_payload })
+        Ok(Self {
+            source_ip,
+            dest_ip,
+            source_port,
+            dest_port,
+            udp_payload,
+        })
     }
 
     pub fn udp_payload(&self) -> &[u8] {
