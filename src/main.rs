@@ -1,14 +1,16 @@
 use dns_proxy::config::{read_config, Config};
 use dns_proxy::packet_wrapper::DnsPacketWrapper;
-use dns_proxy::windivert_packet::create_windivert_packet;
+use dns_proxy::windivert_packet::create_windivert_packet_from;
 use windivert::layer::NetworkLayer;
-use windivert::prelude::WinDivertFlags;
+use windivert::prelude::{WinDivertFlags, WinDivertPacket};
 use windivert::WinDivert;
 
-use std::net::{SocketAddrV4, UdpSocket};
-use std::sync::{Arc, Mutex};
+use std::net::SocketAddrV4;
+use std::sync::Arc;
 
 use etherparse::{NetSlice, PacketBuilder, TransportSlice};
+use tokio::net::UdpSocket;
+use tokio::sync::Mutex;
 
 const CONFIG_PATH: &str = "config.json";
 const PACKET_FILTER_TEMPLATE: &str = "(outbound or loopback) and ip and udp.DstPort == 53 and udp.PayloadLength > {DNS_HEADER_SIZE} and ip.DstAddr != {remote_dns_server}";
@@ -29,14 +31,14 @@ fn hosts_in_blacklist(hosts_blacklist: &[String], questions: &[dns_parser::Quest
     false
 }
 
-fn send_dns_query(dest_address: SocketAddrV4, query: &[u8]) -> std::io::Result<Vec<u8>> {
-    let socket = UdpSocket::bind("0.0.0.0:0")?;
+async fn send_dns_query(dest_address: SocketAddrV4, query: &[u8]) -> std::io::Result<Vec<u8>> {
+    let socket = UdpSocket::bind("0.0.0.0:0").await?;
 
-    socket.connect(dest_address)?;
-    socket.send(query)?;
+    socket.connect(dest_address).await?;
+    socket.send(query).await?;
 
     let mut reply_buf = [0u8; MAX_PACKET_SIZE];
-    let len = socket.recv(&mut reply_buf)?;
+    let len = socket.recv(&mut reply_buf).await?;
 
     log::debug!("DNS Reply: {:?}", &reply_buf[..len]);
 
@@ -74,7 +76,7 @@ fn build_injected_packet(
     Ok(result)
 }
 
-fn relay_to_server(
+async fn relay_to_server(
     windvt: Arc<Mutex<WinDivert<NetworkLayer>>>,
     remote_dns_address: SocketAddrV4,
     request_packet: DnsPacketWrapper,
@@ -88,7 +90,7 @@ fn relay_to_server(
         }
     };
 
-    let reply = match send_dns_query(remote_dns_address, payload) {
+    let reply = match send_dns_query(remote_dns_address, payload).await {
         Ok(reply) => reply,
         Err(e) => {
             log::error!("Failed to send query: {}", e);
@@ -112,22 +114,19 @@ fn relay_to_server(
         }
     };
 
-    let w = match windvt.lock() {
-        Ok(w) => w,
-        Err(e) => {
-            log::error!("Failed to lock windivert: {}", e);
-            return;
-        }
+    let res = {
+        let w = windvt.lock().await;
+        w.send(&inject_packet)
     };
 
-    let res = w.send(&inject_packet);
     match res {
         Ok(_) => log::debug!("Successfully sent packet"),
         Err(e) => log::error!("Failed to send packet: {}", e),
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     env_logger::init();
     let cfg: Config = read_config(CONFIG_PATH);
 
@@ -156,11 +155,10 @@ fn main() {
         }
     };
 
-    let pool = threadpool::ThreadPool::new(num_cpus::get());
     let windvt = Arc::new(Mutex::new(windvt));
     loop {
         let mut buf = [0u8; MAX_PACKET_SIZE];
-        let packet = match windvt.lock().unwrap().recv(Some(&mut buf)) {
+        let packet = match windvt.lock().await.recv(Some(&mut buf)) {
             Ok(packet) => packet,
             Err(e) => {
                 log::error!("Failed to receive packet: {}", e);
@@ -175,7 +173,7 @@ fn main() {
                 log::error!("Failed to parse DNS packet: {}", e);
                 windvt
                     .lock()
-                    .unwrap()
+                    .await
                     .send(&packet)
                     .expect("Failed to reinject non-dns packet");
                 continue;
@@ -187,25 +185,26 @@ fn main() {
             && !hosts_in_blacklist(&cfg.hosts_blacklist, &dns_packet.questions)
         {
             let wdt_ref = Arc::clone(&windvt);
+            let remote_dns_address = cfg.remote_dns_address;
             log::debug!(
                 "Relaying packet to the external DNS server, hosts: {:?}",
                 &dns_packet.questions
             );
 
             // TODO: Find a way to reinject original packet on relay_to_server / divert_to_server errors
-            pool.execute(move || {
+            tokio::spawn(async move {
                 relay_to_server(
                     wdt_ref,
                     remote_dns_address,
                     parsed_packet,
-                    packet.address.interface_index(),
-                )
+                    packet,
+                ).await
             });
             continue;
         }
 
         // Reinject non-relayed packets
-        match windvt.lock().unwrap().send(&packet) {
+        match windvt.lock().await.send(&packet) {
             Ok(_) => log::debug!("Successfully resent received packet"),
             Err(e) => log::error!("Failed to resend received packet: {}", e),
         }
