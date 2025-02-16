@@ -13,7 +13,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 
 const CONFIG_PATH: &str = "config.json";
-const PACKET_FILTER_TEMPLATE: &str = "(outbound or loopback) and ip and udp.DstPort == 53 and udp.PayloadLength > {DNS_HEADER_SIZE} and ip.DstAddr != {remote_dns_server}";
+const PACKET_FILTER_TEMPLATE: &str = "(outbound or loopback) and (ip or ipv6) and udp.DstPort == 53 and udp.PayloadLength > {DNS_HEADER_SIZE} and ip.DstAddr != {remote_dns_server}";
 const DEFAULT_WINDIVERT_PRIORITY: i16 = 5000; // Arbitrary value
 const DNS_HEADER_SIZE: usize = 12;
 const MAX_PACKET_SIZE: usize = 65535;
@@ -40,38 +40,42 @@ async fn send_dns_query(dest_address: SocketAddrV4, query: &[u8]) -> std::io::Re
     let mut reply_buf = [0u8; MAX_PACKET_SIZE];
     let len = socket.recv(&mut reply_buf).await?;
 
-    log::debug!("DNS Reply: {:?}", &reply_buf[..len]);
+    log::trace!("DNS Reply: {:?}", &reply_buf[..len]);
 
     Ok(reply_buf[..len].to_vec())
 }
 
 fn build_injected_packet(
-    request_packet: &DnsPacketWrapper,
+    packet_data: &[u8],
     server_reply: Vec<u8>,
 ) -> Result<Vec<u8>, String> {
-    let slices = request_packet.slices()?;
+    let slices = etherparse::SlicedPacket::from_ip(packet_data).map_err(|e| e.to_string())?;
 
-    let NetSlice::Ipv4(net) = slices.net.unwrap() else {
-        return Err("Not IPv4 packet".to_string());
-    };
     let TransportSlice::Udp(udp) = slices.transport.unwrap() else {
         return Err("Not UDP packet".to_string());
     };
 
-    // Build response packet with swapped addresses
-    let response = PacketBuilder::ipv4(
-        net.header().destination(),
-        net.header().source(),
-        std::cmp::max(net.header().ttl() - 3, 1),
-    )
-    .udp(udp.destination_port(), udp.source_port());
+    // Build the response packet with swapped source and destination addresses
+    let response = match slices.net {
+        Some(NetSlice::Ipv4(ipv4)) => PacketBuilder::ipv4(
+            ipv4.header().destination(),
+            ipv4.header().source(),
+            ipv4.header().ttl(),
+        ),
+        Some(NetSlice::Ipv6(ipv6)) => PacketBuilder::ipv6(
+            ipv6.header().destination(),
+            ipv6.header().source(),
+            ipv6.header().hop_limit(),
+        ),
+        _ => return Err("Not IP packet".to_string()),
+    }.udp(udp.destination_port(), udp.source_port());
 
     let mut result = Vec::<u8>::with_capacity(response.size(server_reply.len()));
     response
         .write(&mut result, &server_reply)
         .map_err(|e| e.to_string())?;
 
-    log::debug!("Built injected packet: {:?}", result);
+    log::trace!("Built injected packet: {:?}", result);
 
     Ok(result)
 }
@@ -82,16 +86,7 @@ async fn relay_to_server(
     request_wrapper: DnsPacketWrapper,
     request_packet: WinDivertPacket<'static, NetworkLayer>,
 ) {
-    let payload = match request_wrapper.udp_payload() {
-        Ok(payload) => payload,
-        Err(e) => {
-            log::error!("Failed to get UDP payload: {}", e);
-            if let Err(e)  = windvt.lock().await.send(&request_packet) {
-                log::error!("Failed to reinject packet: {}", e);
-            }
-            return;
-        }
-    };
+    let payload = request_wrapper.udp_payload();
 
     let reply = match send_dns_query(remote_dns_address, payload).await {
         Ok(reply) => reply,
@@ -104,7 +99,7 @@ async fn relay_to_server(
         }
     };
 
-    let inject_packet_data = match build_injected_packet(&request_wrapper, reply) {
+    let inject_packet_data = match build_injected_packet(&request_packet.data, reply) {
         Ok(packet) => packet,
         Err(e) => {
             log::error!("Failed to build injected packet: {}", e);
@@ -115,7 +110,7 @@ async fn relay_to_server(
         }
     };
 
-    let inject_packet = match create_windivert_packet_from(inject_packet_data, &request_packet, false) {
+    let inject_packet = match create_windivert_packet_from(inject_packet_data, &request_packet, false, true) {
         Ok(packet) => packet,
         Err(e) => {
             log::error!("Failed to create WindDivertPacket: {}", e);
@@ -132,7 +127,12 @@ async fn relay_to_server(
     };
 
     match res {
-        Ok(_) => log::debug!("Successfully sent packet"),
+        Ok(_) => {
+            log::info!("Successfully sent response packet");
+            if log::log_enabled!(log::Level::Debug) {
+                log::debug!("Sent packet: {:?}", DnsPacketWrapper::new(inject_packet.data).unwrap());
+            }
+        },
         Err(e) => log::error!("Failed to send packet: {}", e),
     }
 }
@@ -180,8 +180,20 @@ async fn main() {
 
         let packet = packet.into_owned();
 
-        let parsed_packet = DnsPacketWrapper::from(packet.data.to_vec());
-        let dns_packet = match parsed_packet.dns_packet() {
+        let parsed_packet = match DnsPacketWrapper::new(packet.data.to_vec()) {
+            Ok(parsed_packet) => parsed_packet,
+            Err(e) => {
+                log::error!("Failed to parse packet: {}", e);
+                windvt
+                    .lock()
+                    .await
+                    .send(&packet)
+                    .expect("Failed to reinject non-dns packet");
+                continue;
+            }
+        };
+
+        let dns_packet = match parsed_packet.dns_wrapper() {
             Ok(dns_packet) => dns_packet,
             Err(e) => {
                 log::error!("Failed to parse DNS packet: {}", e);
@@ -194,14 +206,24 @@ async fn main() {
             }
         };
 
-        if dns_packet.header.query
-            && dns_packet.header.questions > 0
-            && !hosts_in_blacklist(&cfg.hosts_blacklist, &dns_packet.questions)
+        if !dns_packet.header.query
+            || dns_packet.header.questions <= 0
+        {
+            log::warn!("Received non-query packet, reinjecting");
+            match windvt.lock().await.send(&packet) {
+                Ok(_) => log::debug!("Successfully resent non-query packet"),
+                Err(e) => log::error!("Failed to resend non-query packet: {}", e),
+            }
+            continue;
+        }
+
+        if !hosts_in_blacklist(&cfg.hosts_blacklist, &dns_packet.questions)
         {
             let wdt_ref = Arc::clone(&windvt);
             let remote_dns_address = cfg.remote_dns_address;
-            log::debug!(
-                "Relaying packet to the external DNS server, hosts: {:?}",
+            log::info!(
+                "Relaying packet to the external DNS server, Source port: {}, hosts: {:?}",
+                parsed_packet.source_port(),
                 &dns_packet.questions
             );
 
@@ -218,8 +240,8 @@ async fn main() {
 
         // Reinject non-relayed packets
         match windvt.lock().await.send(&packet) {
-            Ok(_) => log::debug!("Successfully resent received packet"),
-            Err(e) => log::error!("Failed to resend received packet: {}", e),
+            Ok(_) => log::debug!("Successfully resent blacklisted packet"),
+            Err(e) => log::error!("Failed to resend blacklisted packet: {}", e),
         }
     }
 }

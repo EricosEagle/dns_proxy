@@ -1,8 +1,13 @@
+use std::net::IpAddr;
 use etherparse::{NetSlice, SlicedPacket, TransportSlice};
 
 #[derive(Clone, Debug)]
 pub struct DnsPacketWrapper {
-    buf: Vec<u8>,
+    source_ip: IpAddr,
+    dest_ip: IpAddr,
+    source_port: u16,
+    dest_port: u16,
+    udp_payload: Vec<u8>,
 }
 
 // Since the wrapper hasn't implemented WinDivertHelperParsePacket
@@ -15,70 +20,76 @@ fn get_udp_packet_slices<'a>(buf: &'a [u8]) -> Result<SlicedPacket<'a>, String> 
         }
     };
 
-    log::trace!("Raw Packet: {:#x?}", buf);
-    log::trace!("Net Slice: {:?}", slices.net);
-    log::trace!("Transport Slice: {:?}", slices.transport);
-    if !matches!(slices.net, Some(NetSlice::Ipv4(_)))
+    if !matches!(slices.net, Some(NetSlice::Ipv4(_)) | Some(NetSlice::Ipv6(_)))
         || !matches!(slices.transport, Some(TransportSlice::Udp(_)))
     {
-        return Err("Packet is not IPv4 or UDP".to_string());
+        return Err("Packet is not IPv4/IPv6 or UDP".to_string());
     }
 
     Ok(slices)
 }
 
-impl From<&[u8]> for DnsPacketWrapper {
-    fn from(buf: &[u8]) -> Self {
-        Self { buf: buf.to_vec() }
+fn dns_wrapper_from_payload<'a>(
+    payload: &'a [u8],
+) -> Result<dns_parser::Packet<'a>, String> {
+    dns_parser::Packet::parse(payload).map_err(|e| e.to_string())
+}
+
+fn udp_payload_from_slices<'a>(slices: &SlicedPacket<'a>) -> Result<&'a [u8], String> {
+    match slices.transport {
+        Some(TransportSlice::Udp(ref udp)) => Ok(udp.payload()),
+        _ => Err("Packet is not UDP".to_string()),
     }
 }
 
-impl From<Vec<u8>> for DnsPacketWrapper {
-    fn from(buf: Vec<u8>) -> Self {
-        Self { buf }
-    }
-}
-
-impl Into<Vec<u8>> for DnsPacketWrapper {
-    fn into(self) -> Vec<u8> {
-        self.buf
-    }
-}
-
-// Couldn't store these references in the struct because of lifetime issues
-// so I made them into functions
 impl DnsPacketWrapper {
-    pub fn udp_payload_from_slices<'a>(slices: &SlicedPacket<'a>) -> Result<&'a [u8], String> {
-        match slices.transport {
-            Some(TransportSlice::Udp(ref udp)) => Ok(udp.payload()),
-            _ => Err("Packet is not UDP".to_string()),
-        }
+    pub fn new<T: Into<Vec<u8>>>(buf: T) -> Result<Self, String> {
+        let buf = buf.into();
+        let slices = get_udp_packet_slices(&buf)?;
+        
+        let source_ip = match slices.net {
+            Some(NetSlice::Ipv4(ref ipv4)) => IpAddr::V4(ipv4.header().source_addr()),
+            Some(NetSlice::Ipv6(ref ipv6)) => IpAddr::V6(ipv6.header().source_addr()),
+            _ => return Err("Packet is not IP".to_string()),
+        };
+
+        let dest_ip = match slices.net {
+            Some(NetSlice::Ipv4(ref ipv4)) => IpAddr::V4(ipv4.header().destination_addr()),
+            Some(NetSlice::Ipv6(ref ipv6)) => IpAddr::V6(ipv6.header().destination_addr()),
+            _ => return Err("Packet is not IP".to_string()),
+        };
+
+        let (source_port, dest_port) = match slices.transport {
+            Some(TransportSlice::Udp(ref udp)) => (udp.source_port(), udp.destination_port()),
+            _ => return Err("Packet is not UDP".to_string()),
+        };
+
+        let udp_payload = udp_payload_from_slices(&slices)?.to_vec();
+
+        Ok(Self { source_ip, dest_ip, source_port, dest_port, udp_payload })
     }
 
-    pub fn dns_packet_from_slices<'a>(
-        slices: &SlicedPacket<'a>,
-    ) -> Result<dns_parser::Packet<'a>, String> {
-        let udp_payload = Self::udp_payload_from_slices(slices)?;
-        Self::dns_packet_from_payload(udp_payload)
+    pub fn udp_payload(&self) -> &[u8] {
+        &self.udp_payload
     }
 
-    pub fn dns_packet_from_payload<'a>(
-        payload: &'a [u8],
-    ) -> Result<dns_parser::Packet<'a>, String> {
-        dns_parser::Packet::parse(payload).map_err(|e| e.to_string())
+    pub fn dns_wrapper(&self) -> Result<dns_parser::Packet, String> {
+        dns_wrapper_from_payload(&self.udp_payload)
     }
 
-    pub fn slices<'a>(&'a self) -> Result<SlicedPacket<'a>, String> {
-        get_udp_packet_slices(&self.buf)
+    pub fn source_ip(&self) -> IpAddr {
+        self.source_ip
     }
 
-    pub fn udp_payload<'a>(&'a self) -> Result<&'a [u8], String> {
-        let slices = self.slices()?;
-        Self::udp_payload_from_slices(&slices)
+    pub fn dest_ip(&self) -> IpAddr {
+        self.dest_ip
     }
 
-    pub fn dns_packet<'a>(&'a self) -> Result<dns_parser::Packet<'a>, String> {
-        let udp_payload = self.udp_payload()?;
-        Self::dns_packet_from_payload(udp_payload)
+    pub fn source_port(&self) -> u16 {
+        self.source_port
+    }
+
+    pub fn dest_port(&self) -> u16 {
+        self.dest_port
     }
 }
