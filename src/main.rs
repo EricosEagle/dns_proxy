@@ -5,7 +5,7 @@ use windivert::layer::NetworkLayer;
 use windivert::prelude::{WinDivertFlags, WinDivertPacket};
 use windivert::WinDivert;
 
-use std::net::SocketAddrV4;
+use std::borrow::Cow;
 use std::task::Poll;
 
 use etherparse::{NetSlice, PacketBuilder, TransportSlice};
@@ -277,16 +277,16 @@ async fn process_packet(
     }
 
     if !hosts_in_blacklist(&cfg.hosts_blacklist, &dns_packet.questions) {
-        let remote_dns_address = cfg.remote_dns_address;
         log::info!(
             "Relaying packet to the external DNS server, Source port: {}, hosts: {:?}",
-            parsed_packet.source_port(),
+            parsed_packet.src_port(),
             &dns_packet.questions
         );
 
         let tx = tx.clone();
+        let cfg = cfg.clone();
         tokio::spawn(async move {
-            let res = relay_to_server(remote_dns_address, parsed_packet, &packet);
+            let res = divert_packet(cfg, parsed_packet, &packet);
             tx.send((res.await, packet))
                 .await
                 .expect("Failed to send injected packet over channel");
