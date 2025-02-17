@@ -1,6 +1,5 @@
 use dns_proxy::config::{read_config, Config};
 use dns_proxy::packet_wrapper::DnsPacketWrapper;
-use dns_proxy::windivert_packet::create_windivert_packet_from;
 use windivert::layer::NetworkLayer;
 use windivert::prelude::{WinDivertFlags, WinDivertPacket};
 use windivert::WinDivert;
@@ -8,8 +7,6 @@ use windivert::WinDivert;
 use std::borrow::Cow;
 use std::task::Poll;
 
-use etherparse::{NetSlice, PacketBuilder, TransportSlice};
-use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
 const CONFIG_PATH: &str = "config.json";
@@ -19,7 +16,7 @@ const PACKET_FILTER_TEMPLATE: &str = "(ip or ipv6) \
 const DEFAULT_WINDIVERT_PRIORITY: i16 = 0;
 const DNS_HEADER_SIZE: usize = 12;
 const MAX_PACKET_SIZE: usize = 65535;
-const MAX_CONCURRENT_TASKS: usize = 100; // Arbitrary value
+const MAX_CONCURRENT_TASKS: usize = 256;
 
 fn hosts_in_blacklist(hosts_blacklist: &[String], questions: &[dns_parser::Question]) -> bool {
     for question in questions {
@@ -34,76 +31,22 @@ fn hosts_in_blacklist(hosts_blacklist: &[String], questions: &[dns_parser::Quest
     false
 }
 
-async fn send_dns_query(dest_address: SocketAddrV4, query: &[u8]) -> std::io::Result<Vec<u8>> {
-    let socket = UdpSocket::bind("0.0.0.0:0").await?;
-
-    socket.connect(dest_address).await?;
-    socket.send(query).await?;
-
-    let mut reply_buf = [0u8; MAX_PACKET_SIZE];
-    let len = socket.recv(&mut reply_buf).await?;
-
-    log::trace!("DNS Reply: {:?}", &reply_buf[..len]);
-
-    Ok(reply_buf[..len].to_vec())
-}
-
-fn build_injected_packet(packet_data: &[u8], server_reply: Vec<u8>) -> Result<Vec<u8>, String> {
-    let slices = etherparse::SlicedPacket::from_ip(packet_data).map_err(|e| e.to_string())?;
-
-    let TransportSlice::Udp(udp) = slices.transport.expect("No transport layer") else {
-        return Err("Not UDP packet".to_string());
-    };
-
-    // Build the response packet with swapped source and destination addresses
-    let response = match slices.net {
-        Some(NetSlice::Ipv4(ipv4)) => PacketBuilder::ipv4(
-            ipv4.header().destination(),
-            ipv4.header().source(),
-            ipv4.header().ttl(),
-        ),
-        Some(NetSlice::Ipv6(ipv6)) => PacketBuilder::ipv6(
-            ipv6.header().destination(),
-            ipv6.header().source(),
-            ipv6.header().hop_limit(),
-        ),
-        _ => return Err("Not IP packet".to_string()),
-    }
-    .udp(udp.destination_port(), udp.source_port());
-
-    let mut result = Vec::<u8>::with_capacity(response.size(server_reply.len()));
-    response
-        .write(&mut result, &server_reply)
-        .map_err(|e| e.to_string())?;
-
-    log::trace!("Built injected packet: {:?}", result);
-
-    Ok(result)
-}
-
-async fn relay_to_server(
-    remote_dns_address: SocketAddrV4,
+async fn divert_packet(
+    cfg: Config,
     request_wrapper: DnsPacketWrapper,
     request_packet: &WinDivertPacket<'static, NetworkLayer>,
 ) -> Result<WinDivertPacket<'static, NetworkLayer>, String> {
-    let payload = request_wrapper.udp_payload();
+    let mut modified_packet = request_packet.clone();
+    let modified_wrapper = if request_packet.address.outbound() {
+        request_wrapper.with_dst_addr(cfg.remote_dns_address)
+    } else {
+        request_wrapper.with_src_addr(cfg.original_dns_address)
+    }?;
 
-    let reply = match send_dns_query(remote_dns_address, payload).await {
-        Ok(reply) => reply,
-        Err(e) => {
-            return Err(format!("Failed to send query: {}", e));
-        }
-    };
+    let modified_buf: Vec<u8> = modified_wrapper.try_into()?;
+    modified_packet.data = Cow::from(modified_buf);
 
-    let inject_packet_data = match build_injected_packet(&request_packet.data, reply) {
-        Ok(packet) => packet,
-        Err(e) => {
-            return Err(format!("Failed to build injected packet: {}", e));
-        }
-    };
-
-    create_windivert_packet_from(inject_packet_data, &request_packet, false, true)
-        .map_err(|e| format!("Failed to create WindDivertPacket: {}", e))
+    Ok(modified_packet)
 }
 
 async fn inject_packets(
@@ -113,7 +56,7 @@ async fn inject_packets(
         WinDivertPacket<'static, NetworkLayer>,
     )>,
 ) {
-    for (result, inject_packet) in results {
+    for (result, request_packet) in results {
         match result {
             Ok(inject_packet) => match windvt.send(&inject_packet) {
                 Ok(_) => {
@@ -132,7 +75,7 @@ async fn inject_packets(
             },
             Err(e) => {
                 log::error!("Failed to create inject packet: {}", e);
-                match windvt.send(&inject_packet) {
+                match windvt.send(&request_packet) {
                     Ok(_) => {
                         log::debug!("Successfully resent original packet after failure")
                     }
