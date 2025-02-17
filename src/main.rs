@@ -136,15 +136,6 @@ async fn process_packet(
         }
     };
 
-    if !(dns_packet.header.questions > 0 || !dns_packet.header.query) {
-        log::warn!("Received unsupported dns packet, reinjecting");
-        match windvt.lock().await.send(&packet) {
-            Ok(_) => log::debug!("Successfully resent non-query packet"),
-            Err(e) => log::error!("Failed to resend non-query packet: {}", e),
-        }
-        return Ok(());
-    }
-
     if !hosts_in_blacklist(&cfg.hosts_blacklist, &dns_packet.questions) {
         log::info!(
             "Diverting packet to the external DNS server, Source port: {}, query: {}, hosts: {:?}",
@@ -156,18 +147,25 @@ async fn process_packet(
         let cfg = cfg.clone();
         tokio::spawn(async move {
             let pkt = match divert_packet(cfg, parsed_packet, &packet).await {
-                Ok(pkt) => pkt,
+                Ok(pkt) => {
+                    if log::log_enabled!(log::Level::Debug) {
+                        log::debug!(
+                            "Divert packet: {:?}",
+                            DnsPacketWrapper::new(pkt.data.clone())
+                        )
+                    }
+                    pkt
+                }
                 Err(e) => {
                     log::error!("Failed to divert packet: {}", e);
                     packet
                 }
             };
 
-            windvt
-                .lock()
-                .await
-                .send(&pkt)
-                .expect("Failed to send injected packet over channel");
+            match windvt.lock().await.send(&pkt) {
+                Ok(_) => log::info!("Successfully diverted packet"),
+                Err(e) => log::error!("Failed to send diverted packet: {}", e),
+            }
         });
         return Ok(());
     }

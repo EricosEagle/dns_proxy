@@ -1,7 +1,7 @@
 use dns_proxy::config::{read_config, Config};
 
-use std::net::UdpSocket;
 use std::net::SocketAddrV4;
+use std::net::UdpSocket;
 
 const CONFIG_PATH: &str = "config.json";
 const MAX_PACKET_SIZE: usize = 65535;
@@ -17,10 +17,7 @@ const TEST_PACKET: &[u8] = &[
     0x0, 0x0,
 ];
 
-fn hosts_in_blacklist(
-    hosts_blacklist: &[String],
-    questions: &[dns_parser::Question],
-) -> bool {
+fn hosts_in_blacklist(hosts_blacklist: &[String], questions: &[dns_parser::Question]) -> bool {
     for question in questions {
         let host = &question.qname.to_string();
         if hosts_blacklist
@@ -33,7 +30,7 @@ fn hosts_in_blacklist(
     false
 }
 
-// Since the wrapper hasn't implemented WinDivertHelperParsePacket 
+// Since the wrapper hasn't implemented WinDivertHelperParsePacket
 // it is easier to parse the packet ourselves
 fn get_udp_payload(buf: &[u8]) -> Option<&[u8]> {
     let Ok(slices) = etherparse::SlicedPacket::from_ethernet(buf) else {
@@ -55,10 +52,16 @@ fn parse_dns<'a>() -> Option<(bool, &'a [u8])> {
 
     let dns_packet = dns_parser::Packet::parse(dns_data).expect("Failed to parse dns packet");
 
-    Some((hosts_in_blacklist(&cfg.hosts_blacklist, &dns_packet.questions), dns_data))
+    Some((
+        hosts_in_blacklist(&cfg.hosts_blacklist, &dns_packet.questions),
+        dns_data,
+    ))
 }
 
-fn send_dns_query(dest_address: SocketAddrV4, query: &[u8]) -> std::io::Result<([u8; MAX_PACKET_SIZE], usize)> {
+fn send_dns_query(
+    dest_address: SocketAddrV4,
+    query: &[u8],
+) -> std::io::Result<([u8; MAX_PACKET_SIZE], usize)> {
     let socket = UdpSocket::bind("0.0.0.0:0")?;
     log::debug!("{:?}", socket);
     socket.connect(dest_address)?;
@@ -67,7 +70,10 @@ fn send_dns_query(dest_address: SocketAddrV4, query: &[u8]) -> std::io::Result<(
     let mut reply_buf = [0u8; MAX_PACKET_SIZE];
     let len = socket.recv(&mut reply_buf)?;
 
-    log::debug!("Parsed Reply: {:?}", dns_parser::Packet::parse(&reply_buf[..len]));
+    log::debug!(
+        "Parsed Reply: {:?}",
+        dns_parser::Packet::parse(&reply_buf[..len])
+    );
 
     Ok((reply_buf, len))
 }
@@ -76,7 +82,9 @@ fn main() {
     env_logger::init();
     let config = read_config(CONFIG_PATH);
     let (blacklisted, dns_data) = parse_dns().unwrap();
-    if !blacklisted {return};
+    if !blacklisted {
+        return;
+    };
 
     let (response, len) = send_dns_query(config.remote_dns_address, dns_data).unwrap();
     let response = &response[..len];
