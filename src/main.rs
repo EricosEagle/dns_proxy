@@ -5,9 +5,9 @@ use windivert::prelude::{WinDivertFlags, WinDivertPacket};
 use windivert::WinDivert;
 
 use std::borrow::Cow;
-use std::task::Poll;
+use std::sync::Arc;
 
-use tokio::sync::mpsc;
+use tokio::sync::Mutex;
 
 const CONFIG_PATH: &str = "config.json";
 const PACKET_FILTER_TEMPLATE: &str = "(ip or ipv6) \
@@ -16,7 +16,6 @@ const PACKET_FILTER_TEMPLATE: &str = "(ip or ipv6) \
 const DEFAULT_WINDIVERT_PRIORITY: i16 = 0;
 const DNS_HEADER_SIZE: usize = 12;
 const MAX_PACKET_SIZE: usize = 65535;
-const MAX_CONCURRENT_TASKS: usize = 256;
 
 fn hosts_in_blacklist(hosts_blacklist: &[String], questions: &[dns_parser::Question]) -> bool {
     for question in questions {
@@ -47,45 +46,6 @@ async fn divert_packet(
     modified_packet.data = Cow::from(modified_buf);
 
     Ok(modified_packet)
-}
-
-async fn inject_packets(
-    windvt: &WinDivert<NetworkLayer>,
-    results: Vec<(
-        Result<WinDivertPacket<'static, NetworkLayer>, String>,
-        WinDivertPacket<'static, NetworkLayer>,
-    )>,
-) {
-    for (result, request_packet) in results {
-        match result {
-            Ok(inject_packet) => match windvt.send(&inject_packet) {
-                Ok(_) => {
-                    log::info!("Successfully sent response packet");
-                    if log::log_enabled!(log::Level::Debug) {
-                        log::debug!(
-                            "Sent packet: {:?}",
-                            DnsPacketWrapper::new(inject_packet.data).unwrap()
-                        );
-                    }
-                }
-                Err(e) => {
-                    log::error!("Failed to send packet: {}", e);
-                    continue;
-                }
-            },
-            Err(e) => {
-                log::error!("Failed to create inject packet: {}", e);
-                match windvt.send(&request_packet) {
-                    Ok(_) => {
-                        log::debug!("Successfully resent original packet after failure")
-                    }
-                    Err(e) => {
-                        log::error!("Failed to resend original packet after failure: {}", e)
-                    }
-                }
-            }
-        }
-    }
 }
 
 #[tokio::main]
@@ -122,48 +82,14 @@ async fn main() {
         }
     };
 
-    let (tx, mut rx) = mpsc::channel::<(
-        Result<WinDivertPacket<'static, NetworkLayer>, String>,
-        WinDivertPacket<'static, NetworkLayer>,
-    )>(MAX_CONCURRENT_TASKS);
-
-    let waker = futures::task::noop_waker();
-    let mut cx = std::task::Context::from_waker(&waker);
-
-    main_loop(&cfg, &windvt, &tx, &mut rx, &mut cx).await;
+    main_loop(cfg, windvt).await;
 }
 
-async fn main_loop(
-    cfg: &Config,
-    windvt: &WinDivert<NetworkLayer>,
-    tx: &mpsc::Sender<(
-        Result<WinDivertPacket<'static, NetworkLayer>, String>,
-        WinDivertPacket<'static, NetworkLayer>,
-    )>,
-    rx: &mut mpsc::Receiver<(
-        Result<WinDivertPacket<'static, NetworkLayer>, String>,
-        WinDivertPacket<'static, NetworkLayer>,
-    )>,
-    cx: &mut std::task::Context<'_>,
-) {
+async fn main_loop(cfg: Config, windvt: WinDivert<NetworkLayer>) {
+    let windvt = Arc::new(Mutex::new(windvt));
     loop {
-        let mut results: Vec<(
-            Result<WinDivertPacket<'static, NetworkLayer>, String>,
-            WinDivertPacket<'static, NetworkLayer>,
-        )> = Vec::new();
-        match rx.poll_recv_many(cx, &mut results, MAX_CONCURRENT_TASKS) {
-            Poll::Pending => log::debug!("No packets to inject"),
-            Poll::Ready(0) => {
-                log::error!("Channel closed, aborting");
-                break;
-            }
-            Poll::Ready(_) => {
-                inject_packets(windvt, results).await;
-            }
-        }
-
         let mut buf = [0u8; MAX_PACKET_SIZE];
-        let packet = match windvt.recv(Some(&mut buf)) {
+        let packet = match windvt.lock().await.recv(Some(&mut buf)) {
             Ok(packet) => packet,
             Err(e) => {
                 log::error!("Failed to receive packet: {}", e);
@@ -173,7 +99,7 @@ async fn main_loop(
 
         let packet = packet.into_owned();
 
-        if let Err(e) = process_packet(cfg, windvt, tx, packet).await {
+        if let Err(e) = process_packet(&cfg, windvt.clone(), packet).await {
             log::error!("Error processing packet: {}", e);
         }
     }
@@ -181,11 +107,7 @@ async fn main_loop(
 
 async fn process_packet(
     cfg: &Config,
-    windvt: &WinDivert<NetworkLayer>,
-    tx: &mpsc::Sender<(
-        Result<WinDivertPacket<'static, NetworkLayer>, String>,
-        WinDivertPacket<'static, NetworkLayer>,
-    )>,
+    windvt: Arc<Mutex<WinDivert<NetworkLayer>>>,
     packet: WinDivertPacket<'static, NetworkLayer>,
 ) -> Result<(), String> {
     let parsed_packet = match DnsPacketWrapper::new(packet.data.to_vec()) {
@@ -193,6 +115,8 @@ async fn process_packet(
         Err(e) => {
             log::error!("Failed to parse packet: {}", e);
             windvt
+                .lock()
+                .await
                 .send(&packet)
                 .expect("Failed to reinject non-dns packet");
             return Err("Failed to parse packet".to_string());
@@ -204,15 +128,17 @@ async fn process_packet(
         Err(e) => {
             log::error!("Failed to parse DNS packet: {}", e);
             windvt
+                .lock()
+                .await
                 .send(&packet)
                 .expect("Failed to reinject non-dns packet");
             return Err("Failed to parse DNS packet".to_string());
         }
     };
 
-    if !dns_packet.header.query || dns_packet.header.questions <= 0 {
-        log::warn!("Received non-query packet, reinjecting");
-        match windvt.send(&packet) {
+    if !(dns_packet.header.questions > 0 || !dns_packet.header.query) {
+        log::warn!("Received unsupported dns packet, reinjecting");
+        match windvt.lock().await.send(&packet) {
             Ok(_) => log::debug!("Successfully resent non-query packet"),
             Err(e) => log::error!("Failed to resend non-query packet: {}", e),
         }
@@ -221,24 +147,33 @@ async fn process_packet(
 
     if !hosts_in_blacklist(&cfg.hosts_blacklist, &dns_packet.questions) {
         log::info!(
-            "Relaying packet to the external DNS server, Source port: {}, hosts: {:?}",
+            "Diverting packet to the external DNS server, Source port: {}, query: {}, hosts: {:?}",
             parsed_packet.src_port(),
+            dns_packet.header.query,
             &dns_packet.questions
         );
 
-        let tx = tx.clone();
         let cfg = cfg.clone();
         tokio::spawn(async move {
-            let res = divert_packet(cfg, parsed_packet, &packet);
-            tx.send((res.await, packet))
+            let pkt = match divert_packet(cfg, parsed_packet, &packet).await {
+                Ok(pkt) => pkt,
+                Err(e) => {
+                    log::error!("Failed to divert packet: {}", e);
+                    packet
+                }
+            };
+
+            windvt
+                .lock()
                 .await
+                .send(&pkt)
                 .expect("Failed to send injected packet over channel");
         });
         return Ok(());
     }
 
     // Reinject non-relayed packets
-    match windvt.send(&packet) {
+    match windvt.lock().await.send(&packet) {
         Ok(_) => log::debug!("Successfully resent blacklisted packet"),
         Err(e) => log::error!("Failed to resend blacklisted packet: {}", e),
     }
