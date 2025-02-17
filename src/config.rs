@@ -1,11 +1,12 @@
 use std::fs;
-use std::net::SocketAddrV4;
+use std::net::SocketAddr;
 
 use serde::Deserialize;
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct Config {
-    pub remote_dns_address: SocketAddrV4,
+    pub original_dns_address: SocketAddr,
+    pub remote_dns_address: SocketAddr,
     pub hosts_blacklist: Vec<String>,
 }
 

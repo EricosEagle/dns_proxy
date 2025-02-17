@@ -13,8 +13,10 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
 const CONFIG_PATH: &str = "config.json";
-const PACKET_FILTER_TEMPLATE: &str = "(outbound or loopback) and (ip or ipv6) and udp.DstPort == 53 and udp.PayloadLength > {DNS_HEADER_SIZE} and ip.DstAddr != {remote_dns_server}";
-const DEFAULT_WINDIVERT_PRIORITY: i16 = 5000; // Arbitrary value
+const PACKET_FILTER_TEMPLATE: &str = "(ip or ipv6) \
+    and ((udp.DstPort == {original_dns_port} && ip.DstAddr != {remote_dns_server}) or (udp.SrcPort == {remote_dns_port} and ip.SrcAddr == {remote_dns_server})) \
+    and udp.PayloadLength > {DNS_HEADER_SIZE}";
+const DEFAULT_WINDIVERT_PRIORITY: i16 = 0;
 const DNS_HEADER_SIZE: usize = 12;
 const MAX_PACKET_SIZE: usize = 65535;
 const MAX_CONCURRENT_TASKS: usize = 100; // Arbitrary value
@@ -157,6 +159,10 @@ async fn main() {
         .replace(
             "{remote_dns_port}",
             &cfg.remote_dns_address.port().to_string(),
+        )
+        .replace(
+            "{original_dns_port}",
+            &cfg.original_dns_address.port().to_string(),
         )
         .replace("{DNS_HEADER_SIZE}", &DNS_HEADER_SIZE.to_string());
     log::trace!("Packet filter: {}", packet_filter);

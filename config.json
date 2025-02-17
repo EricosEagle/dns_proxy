@@ -1,4 +1,5 @@
 {
+    "original_dns_address": "1.1.1.1:53",
     "remote_dns_address": "8.8.8.8:53",
     "hosts_blacklist": ["dontrelayme.com", "metoo.biz"]
 }
