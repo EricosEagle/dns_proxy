@@ -1,17 +1,19 @@
 use dns_proxy::config::{read_config, Config};
 use dns_proxy::packet_wrapper::DnsPacketWrapper;
+use dns_proxy::windivert_packet::create_windivert_packet_from;
 use windivert::layer::NetworkLayer;
 use windivert::prelude::{WinDivertFlags, WinDivertPacket};
 use windivert::WinDivert;
 
-use std::borrow::Cow;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
+use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 
 const CONFIG_PATH: &str = "config.json";
 const PACKET_FILTER_TEMPLATE: &str = "(ip or ipv6) \
-    and ((udp.DstPort == {original_dns_port} && ip.DstAddr != {remote_dns_server}) or (udp.SrcPort == {remote_dns_port} and ip.SrcAddr == {remote_dns_server})) \
+    and (udp.DstPort == {original_dns_port} && ip.DstAddr != {remote_dns_server}) \
     and udp.PayloadLength > {DNS_HEADER_SIZE}";
 const DEFAULT_WINDIVERT_PRIORITY: i16 = 0;
 const DNS_HEADER_SIZE: usize = 12;
@@ -30,22 +32,46 @@ fn hosts_in_blacklist(hosts_blacklist: &[String], questions: &[dns_parser::Quest
     false
 }
 
-async fn divert_packet(
-    cfg: Config,
+async fn send_dns_query(dest_address: SocketAddr, query: &[u8]) -> std::io::Result<Vec<u8>> {
+    let socket = UdpSocket::bind("0.0.0.0:0").await?;
+
+    socket.connect(dest_address).await?;
+    socket.send(query).await?;
+
+    let mut reply_buf = [0u8; MAX_PACKET_SIZE];
+    let len = socket.recv(&mut reply_buf).await?;
+
+    log::trace!("DNS Reply: {:?}", &reply_buf[..len]);
+
+    Ok(reply_buf[..len].to_vec())
+}
+
+async fn relay_to_server(
+    remote_dns_address: SocketAddr,
     request_wrapper: DnsPacketWrapper,
     request_packet: &WinDivertPacket<'static, NetworkLayer>,
 ) -> Result<WinDivertPacket<'static, NetworkLayer>, String> {
-    let mut modified_packet = request_packet.clone();
-    let modified_wrapper = if request_packet.address.outbound() {
-        request_wrapper.with_dst_addr(cfg.remote_dns_address)
-    } else {
-        request_wrapper.with_src_addr(cfg.original_dns_address)
-    }?;
+    let reply = match send_dns_query(remote_dns_address, request_wrapper.udp_payload()).await {
+        Ok(reply) => reply,
+        Err(e) => {
+            return Err(format!("Failed to send query: {}", e));
+        }
+    };
 
-    let modified_buf: Vec<u8> = modified_wrapper.to_packet()?;
-    modified_packet.data = Cow::from(modified_buf);
+    let inject_wrapper = request_wrapper
+        .with_payload(reply)
+        .swap_addresses()
+        .to_owned();
 
-    Ok(modified_packet)
+    let inject_packet_data: Vec<u8> = match inject_wrapper.to_packet() {
+        Ok(packet) => packet,
+        Err(e) => {
+            return Err(format!("Failed to build injected packet: {}", e));
+        }
+    };
+
+    create_windivert_packet_from(inject_packet_data, request_packet, false, true)
+        .map_err(|e| e.to_string())
 }
 
 #[tokio::main]
@@ -110,7 +136,7 @@ async fn process_packet(
     windvt: Arc<Mutex<WinDivert<NetworkLayer>>>,
     packet: WinDivertPacket<'static, NetworkLayer>,
 ) -> Result<(), String> {
-    let parsed_packet = match DnsPacketWrapper::new(&packet.data) {
+    let packet_wrapper = match DnsPacketWrapper::new(&packet.data) {
         Ok(parsed_packet) => parsed_packet,
         Err(e) => {
             log::error!("Failed to parse packet: {}", e);
@@ -123,7 +149,7 @@ async fn process_packet(
         }
     };
 
-    let dns_packet = match parsed_packet.dns_wrapper() {
+    let dns_packet = match packet_wrapper.dns_wrapper() {
         Ok(dns_packet) => dns_packet,
         Err(e) => {
             log::error!("Failed to parse DNS packet: {}", e);
@@ -136,32 +162,32 @@ async fn process_packet(
         }
     };
 
-    if !hosts_in_blacklist(&cfg.hosts_blacklist, &dns_packet.questions) {
+    if dns_packet.header.query && !hosts_in_blacklist(&cfg.hosts_blacklist, &dns_packet.questions) {
         log::info!(
-            "Diverting packet to the external DNS server, Source port: {}, query: {}, hosts: {:?}",
-            parsed_packet.src_port(),
+            "Relaying packet to the external DNS server, Source port: {}, query: {}, hosts: {:?}",
+            packet_wrapper.src_port(),
             dns_packet.header.query,
             &dns_packet.questions
         );
 
-        let cfg = cfg.clone();
+        let remote_address = cfg.remote_dns_address;
         tokio::spawn(async move {
-            let pkt = match divert_packet(cfg, parsed_packet, &packet).await {
+            let pkt = match relay_to_server(remote_address, packet_wrapper, &packet).await {
                 Ok(pkt) => {
                     if log::log_enabled!(log::Level::Debug) {
-                        log::debug!("Divert packet: {:?}", DnsPacketWrapper::new(&pkt.data))
+                        log::debug!("Relay packet: {:?}", DnsPacketWrapper::new(&pkt.data))
                     }
                     pkt
                 }
                 Err(e) => {
-                    log::error!("Failed to divert packet: {}", e);
+                    log::error!("Failed to relay packet: {}", e);
                     packet
                 }
             };
 
             match windvt.lock().await.send(&pkt) {
-                Ok(_) => log::info!("Successfully diverted packet"),
-                Err(e) => log::error!("Failed to send diverted packet: {}", e),
+                Ok(_) => log::info!("Successfully relayed packet"),
+                Err(e) => log::error!("Failed to send relay packet: {}", e),
             }
         });
         return Ok(());
