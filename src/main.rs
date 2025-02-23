@@ -42,7 +42,7 @@ async fn divert_packet(
         request_wrapper.with_src_addr(cfg.original_dns_address)
     }?;
 
-    let modified_buf: Vec<u8> = modified_wrapper.try_into()?;
+    let modified_buf: Vec<u8> = modified_wrapper.to_vec()?;
     modified_packet.data = Cow::from(modified_buf);
 
     Ok(modified_packet)
@@ -110,7 +110,7 @@ async fn process_packet(
     windvt: Arc<Mutex<WinDivert<NetworkLayer>>>,
     packet: WinDivertPacket<'static, NetworkLayer>,
 ) -> Result<(), String> {
-    let parsed_packet = match DnsPacketWrapper::new(packet.data.to_vec()) {
+    let parsed_packet = match DnsPacketWrapper::new(&packet.data) {
         Ok(parsed_packet) => parsed_packet,
         Err(e) => {
             log::error!("Failed to parse packet: {}", e);
@@ -149,10 +149,7 @@ async fn process_packet(
             let pkt = match divert_packet(cfg, parsed_packet, &packet).await {
                 Ok(pkt) => {
                     if log::log_enabled!(log::Level::Debug) {
-                        log::debug!(
-                            "Divert packet: {:?}",
-                            DnsPacketWrapper::new(pkt.data.clone())
-                        )
+                        log::debug!("Divert packet: {:?}", DnsPacketWrapper::new(&pkt.data))
                     }
                     pkt
                 }

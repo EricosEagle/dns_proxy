@@ -44,9 +44,9 @@ fn udp_payload_from_slices<'a>(slices: &SlicedPacket<'a>) -> Result<&'a [u8], St
 }
 
 impl DnsPacketWrapper {
-    pub fn new<T: Into<Vec<u8>>>(buf: T) -> Result<Self, String> {
-        let buf = buf.into();
-        let slices = get_udp_packet_slices(&buf)?;
+    pub fn new<T: AsRef<[u8]>>(buf: T) -> Result<Self, String> {
+        let buf = buf.as_ref();
+        let slices = get_udp_packet_slices(buf)?;
 
         let (src_ip, dst_ip, ttl) = match slices.net {
             Some(NetSlice::Ipv4(ref ipv4)) => (
@@ -169,12 +169,8 @@ impl DnsPacketWrapper {
     pub fn ttl(&self) -> u8 {
         self.ttl
     }
-}
 
-impl TryInto<Vec<u8>> for DnsPacketWrapper {
-    type Error = String;
-
-    fn try_into(self) -> Result<Vec<u8>, Self::Error> {
+    pub fn to_vec(&self) -> Result<Vec<u8>, String> {
         // Build the response packet with swapped source and destination addresses
         let response = match (self.src_ip, self.dst_ip) {
             (IpAddr::V4(src), IpAddr::V4(dst)) => {
