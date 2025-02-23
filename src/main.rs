@@ -42,7 +42,7 @@ async fn divert_packet(
         request_wrapper.with_src_addr(cfg.original_dns_address)
     }?;
 
-    let modified_buf: Vec<u8> = modified_wrapper.to_vec()?;
+    let modified_buf: Vec<u8> = modified_wrapper.to_packet()?;
     modified_packet.data = Cow::from(modified_buf);
 
     Ok(modified_packet)

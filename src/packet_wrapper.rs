@@ -79,6 +79,13 @@ impl DnsPacketWrapper {
         })
     }
 
+    pub fn swap_addresses(&mut self) -> &mut Self {
+        (self.src_ip, self.dst_ip) = (self.dst_ip, self.src_ip);
+        (self.src_port, self.dst_port) = (self.dst_port, self.src_port);
+
+        self
+    }
+
     pub fn with_src(&self, src_ip: IpAddr, src_port: u16) -> Result<Self, &str> {
         if !matches!(
             (self.src_ip, src_ip),
@@ -134,8 +141,24 @@ impl DnsPacketWrapper {
         }
     }
 
+    pub fn with_swapped_addresses(&self) -> Self {
+        Self {
+            src_ip: self.dst_ip,
+            dst_ip: self.src_ip,
+            src_port: self.dst_port,
+            dst_port: self.src_port,
+            ttl: self.ttl,
+            udp_payload: self.udp_payload.clone(),
+        }
+    }
+
     pub fn udp_payload(&self) -> &[u8] {
         &self.udp_payload
+    }
+
+    pub fn set_udp_payload(&mut self, udp_payload: Vec<u8>) -> &mut Self {
+        self.udp_payload = udp_payload;
+        self
     }
 
     pub fn dns_wrapper(&self) -> Result<dns_parser::Packet, String> {
@@ -170,7 +193,7 @@ impl DnsPacketWrapper {
         self.ttl
     }
 
-    pub fn to_vec(&self) -> Result<Vec<u8>, String> {
+    pub fn to_packet(&self) -> Result<Vec<u8>, String> {
         // Build the response packet with swapped source and destination addresses
         let response = match (self.src_ip, self.dst_ip) {
             (IpAddr::V4(src), IpAddr::V4(dst)) => {
