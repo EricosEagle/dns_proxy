@@ -2,7 +2,7 @@ use etherparse::{NetSlice, PacketBuilder, SlicedPacket, TransportSlice};
 use std::net::{IpAddr, SocketAddr};
 
 #[derive(Clone, Debug)]
-pub struct DnsPacketWrapper {
+pub struct PacketWrapper {
     src_ip: IpAddr,
     dst_ip: IpAddr,
     src_port: u16,
@@ -32,7 +32,7 @@ fn get_udp_packet_slices(buf: &[u8]) -> Result<SlicedPacket<'_>, String> {
     Ok(slices)
 }
 
-fn dns_wrapper_from_payload(payload: &[u8]) -> Result<dns_parser::Packet, String> {
+fn dns_packet_from_payload(payload: &[u8]) -> Result<dns_parser::Packet, String> {
     dns_parser::Packet::parse(payload).map_err(|e| e.to_string())
 }
 
@@ -43,7 +43,7 @@ fn udp_payload_from_slices<'a>(slices: &SlicedPacket<'a>) -> Result<&'a [u8], St
     }
 }
 
-impl DnsPacketWrapper {
+impl PacketWrapper {
     pub fn new<T: AsRef<[u8]>>(buf: T) -> Result<Self, String> {
         let buf = buf.as_ref();
         let slices = get_udp_packet_slices(buf)?;
@@ -162,7 +162,7 @@ impl DnsPacketWrapper {
     }
 
     pub fn dns_wrapper(&self) -> Result<dns_parser::Packet, String> {
-        dns_wrapper_from_payload(&self.udp_payload)
+        dns_packet_from_payload(&self.udp_payload)
     }
 
     pub fn src_ip(&self) -> IpAddr {

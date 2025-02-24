@@ -1,5 +1,5 @@
 use dns_redirection::config::{read_config, Config};
-use dns_redirection::packet_wrapper::DnsPacketWrapper;
+use dns_redirection::packet_wrapper::PacketWrapper;
 use dns_redirection::windivert_packet::create_windivert_packet_from;
 use windivert::layer::NetworkLayer;
 use windivert::prelude::{WinDivertFlags, WinDivertPacket};
@@ -45,7 +45,7 @@ async fn send_dns_query(dest_address: SocketAddr, query: &[u8]) -> std::io::Resu
 
 async fn relay_to_server(
     remote_dns_address: SocketAddr,
-    request_wrapper: DnsPacketWrapper,
+    request_wrapper: PacketWrapper,
     request_packet: &WinDivertPacket<'static, NetworkLayer>,
 ) -> Result<WinDivertPacket<'static, NetworkLayer>, String> {
     let reply = match send_dns_query(remote_dns_address, request_wrapper.udp_payload()).await {
@@ -135,7 +135,7 @@ async fn process_packet(
     windvt: Arc<Mutex<WinDivert<NetworkLayer>>>,
     packet: WinDivertPacket<'static, NetworkLayer>,
 ) -> Result<(), String> {
-    let packet_wrapper = match DnsPacketWrapper::new(&packet.data) {
+    let packet_wrapper = match PacketWrapper::new(&packet.data) {
         Ok(parsed_packet) => parsed_packet,
         Err(e) => {
             log::error!("Failed to parse packet: {}", e);
@@ -174,7 +174,7 @@ async fn process_packet(
             let pkt = match relay_to_server(remote_address, packet_wrapper, &packet).await {
                 Ok(pkt) => {
                     if log::log_enabled!(log::Level::Debug) {
-                        log::debug!("Relay packet: {:?}", DnsPacketWrapper::new(&pkt.data))
+                        log::debug!("Relay packet: {:?}", PacketWrapper::new(&pkt.data))
                     }
                     pkt
                 }
