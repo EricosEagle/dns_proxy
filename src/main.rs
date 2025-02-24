@@ -12,9 +12,6 @@ use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 
 const CONFIG_PATH: &str = "config.json";
-const PACKET_FILTER_TEMPLATE: &str = "(ip or ipv6) \
-    and (udp.DstPort == {original_dns_port} && ip.DstAddr != {remote_dns_server}) \
-    and udp.PayloadLength > {DNS_HEADER_SIZE}";
 const DEFAULT_WINDIVERT_PRIORITY: i16 = 0;
 const DNS_HEADER_SIZE: usize = 12;
 const MAX_PACKET_SIZE: usize = 65535;
@@ -74,26 +71,28 @@ async fn relay_to_server(
         .map_err(|e| e.to_string())
 }
 
+/// Constructs a packet filter string for capturing DNS packets based on the following criteria:
+/// - The packet is either IPv4 or IPv6.
+/// - The packet's destination UDP port matches the original DNS address port.
+/// - The packet's destination IP address does not match the remote DNS address IP.
+/// - The UDP payload length is greater than the DNS header size.
+/// - The third byte of the UDP payload has its most significant bit (0x80) unset, indicating a DNS query (not a response).
+///
+/// Note: Bitwise operators aren't supported by the windivert filter syntax, so comparison operators are used instead
+fn generate_packet_filter(cfg: &Config) -> String {
+    format!(
+        "(ip or ipv6) and (udp.DstPort == {} && ip.DstAddr != {}) and udp.PayloadLength > {} and udp.Payload[2] < 0x80",
+        cfg.original_dns_address.port(),
+        cfg.remote_dns_address.ip(),
+        DNS_HEADER_SIZE,
+    )
+}
+
 #[tokio::main]
 async fn main() {
     env_logger::init();
     let cfg: Config = read_config(CONFIG_PATH);
-
-    // Can't format with a const template so we replace the placeholders manually
-    let packet_filter = PACKET_FILTER_TEMPLATE
-        .replace(
-            "{remote_dns_server}",
-            &cfg.remote_dns_address.ip().to_string(),
-        )
-        .replace(
-            "{remote_dns_port}",
-            &cfg.remote_dns_address.port().to_string(),
-        )
-        .replace(
-            "{original_dns_port}",
-            &cfg.original_dns_address.port().to_string(),
-        )
-        .replace("{DNS_HEADER_SIZE}", &DNS_HEADER_SIZE.to_string());
+    let packet_filter = generate_packet_filter(&cfg);
     log::trace!("Packet filter: {}", packet_filter);
 
     let windvt = match WinDivert::network(
@@ -162,7 +161,7 @@ async fn process_packet(
         }
     };
 
-    if dns_packet.header.query && !hosts_in_blacklist(&cfg.hosts_blacklist, &dns_packet.questions) {
+    if !hosts_in_blacklist(&cfg.hosts_blacklist, &dns_packet.questions) {
         log::info!(
             "Relaying packet to the external DNS server, Source port: {}, query: {}, hosts: {:?}",
             packet_wrapper.src_port(),
