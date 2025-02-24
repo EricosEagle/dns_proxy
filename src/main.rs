@@ -1,6 +1,6 @@
-use dns_proxy::config::{read_config, Config};
-use dns_proxy::packet_wrapper::DnsPacketWrapper;
-use dns_proxy::windivert_packet::create_windivert_packet_from;
+use dns_redirection::config::{read_config, Config};
+use dns_redirection::packet_wrapper::DnsPacketWrapper;
+use dns_redirection::windivert_packet::create_windivert_packet_from;
 use windivert::layer::NetworkLayer;
 use windivert::prelude::{WinDivertFlags, WinDivertPacket};
 use windivert::WinDivert;

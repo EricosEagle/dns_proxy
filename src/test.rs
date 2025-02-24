@@ -1,4 +1,4 @@
-use dns_proxy::config::{read_config, Config};
+use dns_redirection::config::{read_config, Config};
 
 use std::net::SocketAddrV4;
 use std::net::UdpSocket;

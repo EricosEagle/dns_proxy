@@ -1,5 +1,5 @@
 [package]
-name = "dns_proxy"
+name = "dns_redirection"
 version = "0.1.0"
 edition = "2021"
 
