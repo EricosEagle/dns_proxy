@@ -15,7 +15,7 @@ use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 
-const CONFIG_PATH: &str = "config.json";
+const CONFIG_PATH: &str = "config_dns.json";
 const DEFAULT_WINDIVERT_PRIORITY: i16 = 0;
 const DNS_HEADER_SIZE: usize = 12;
 const MAX_PACKET_SIZE: usize = 65535;
