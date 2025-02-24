@@ -43,6 +43,7 @@ fn udp_payload_from_slices<'a>(slices: &SlicedPacket<'a>) -> Result<&'a [u8], St
     }
 }
 
+#[allow(dead_code)]
 impl PacketWrapper {
     pub fn new<T: AsRef<[u8]>>(buf: T) -> Result<Self, String> {
         let buf = buf.as_ref();
