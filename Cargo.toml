@@ -3,6 +3,18 @@ name = "dns_redirection"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "dns_redirection"
+path = "src/main.rs"
+
+[[bin]]
+name = "dns_proxy"
+path = "src/dns/mod.rs"
+
+[[bin]]
+name = "http_server"
+path = "src/http_server/mod.rs"
+
 [profile.release]
 debug = 1
 
