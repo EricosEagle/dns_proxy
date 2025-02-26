@@ -7,7 +7,7 @@ use packet_wrapper::PacketWrapper;
 use windivert::layer::NetworkLayer;
 use windivert::prelude::{WinDivertFlags, WinDivertPacket};
 use windivert::WinDivert;
-use windivert_packet::create_windivert_packet_from;
+use windivert_packet::{create_windivert_packet_from, PacketDirection, PacketSource};
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -71,8 +71,13 @@ async fn relay_to_server(
         }
     };
 
-    create_windivert_packet_from(inject_packet_data, request_packet, false, true)
-        .map_err(|e| e.to_string())
+    create_windivert_packet_from(
+        inject_packet_data,
+        request_packet,
+        PacketDirection::Inbound,
+        PacketSource::Imposter,
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// Constructs a packet filter string for capturing DNS packets based on the following criteria:
