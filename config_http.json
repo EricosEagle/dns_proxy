@@ -1,0 +1,4 @@
+{
+    "listen_address": "127.0.0.2:80",
+    "response_data_path": "response.html"
+}

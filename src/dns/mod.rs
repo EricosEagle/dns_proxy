@@ -94,8 +94,7 @@ fn generate_packet_filter(cfg: &Config) -> String {
 
 #[tokio::main]
 pub async fn main() {
-    env_logger::init();
-    let cfg: Config = read_config(CONFIG_PATH);
+    let cfg: Config = read_config(CONFIG_PATH); // TODO: Find way to nest all configs in one file
     let packet_filter = generate_packet_filter(&cfg);
     log::trace!("Packet filter: {}", packet_filter);
 
