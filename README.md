@@ -51,7 +51,7 @@ The project uses two configuration files:
 
 ### Running all modules
 
-To run the HTTP server:
+To run all modules together as separate threads:
 
 ```sh
 cargo run --bin dns_redirection
