@@ -79,7 +79,7 @@ cargo run --bin dns_proxy
 - [tokio](https://crates.io/crates/tokio): Asynchronous runtime.
 - [serde](https://crates.io/crates/serde): Serialization framework.
 - [windivert](https://crates.io/crates/windivert): WinDivert bindings for Rust.
-- [dns-parser](https://crates.io/crates/dns-parser): DNS packet parser.
+- [simple-dns](https://crates.io/crates/simple-dns): DNS packet parser. (Used instead of dns parser as it is still maintained).
 
 ## License
 

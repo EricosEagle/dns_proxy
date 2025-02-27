@@ -32,8 +32,8 @@ fn get_udp_packet_slices(buf: &[u8]) -> Result<SlicedPacket<'_>, String> {
     Ok(slices)
 }
 
-fn dns_packet_from_payload(payload: &[u8]) -> Result<dns_parser::Packet, String> {
-    dns_parser::Packet::parse(payload).map_err(|e| e.to_string())
+fn dns_packet_from_payload(payload: &[u8]) -> Result<simple_dns::Packet, String> {
+    simple_dns::Packet::parse(payload).map_err(|e| e.to_string())
 }
 
 fn udp_payload_from_slices<'a>(slices: &SlicedPacket<'a>) -> Result<&'a [u8], String> {
@@ -162,7 +162,7 @@ impl PacketWrapper {
         self
     }
 
-    pub fn dns_wrapper(&self) -> Result<dns_parser::Packet, String> {
+    pub fn dns_wrapper(&self) -> Result<simple_dns::Packet, String> {
         dns_packet_from_payload(&self.udp_payload)
     }
 

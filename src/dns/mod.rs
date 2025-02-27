@@ -20,7 +20,7 @@ const DEFAULT_WINDIVERT_PRIORITY: i16 = 0;
 const DNS_HEADER_SIZE: usize = 12;
 const MAX_PACKET_SIZE: usize = 65535;
 
-fn hosts_in_blacklist(hosts_blacklist: &[String], questions: &[dns_parser::Question]) -> bool {
+fn hosts_in_blacklist(hosts_blacklist: &[String], questions: &[simple_dns::Question]) -> bool {
     for question in questions {
         let host = &question.qname.to_string();
         if hosts_blacklist
@@ -171,9 +171,8 @@ async fn process_packet(
 
     if !hosts_in_blacklist(&cfg.hosts_blacklist, &dns_packet.questions) {
         log::info!(
-            "Relaying packet to the external DNS server, Source port: {}, query: {}, hosts: {:?}",
+            "Relaying packet to the external DNS server, Source port: {},  hosts: {:?}",
             packet_wrapper.src_port(),
-            dns_packet.header.query,
             &dns_packet.questions
         );
 
