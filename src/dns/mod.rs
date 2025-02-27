@@ -4,12 +4,14 @@ mod windivert_packet;
 
 use config::{read_config, Config};
 use packet_wrapper::PacketWrapper;
+use simple_dns::rdata::{RData, A, AAAA};
+use simple_dns::{CLASS, QCLASS, QTYPE, TYPE};
 use windivert::layer::NetworkLayer;
 use windivert::prelude::{WinDivertFlags, WinDivertPacket};
 use windivert::WinDivert;
 use windivert_packet::{create_windivert_packet_from, PacketDirection, PacketSource};
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use tokio::net::UdpSocket;
@@ -17,7 +19,7 @@ use tokio::sync::Mutex;
 
 const CONFIG_PATH: &str = "config_dns.json";
 const DEFAULT_WINDIVERT_PRIORITY: i16 = 0;
-const DNS_HEADER_SIZE: usize = 12;
+const MIN_DNS_HEADER_SIZE: usize = 12;
 const MAX_PACKET_SIZE: usize = 65535;
 
 fn hosts_in_blacklist(hosts_blacklist: &[String], questions: &[simple_dns::Question]) -> bool {
@@ -80,6 +82,75 @@ async fn relay_to_server(
     .map_err(|e| e.to_string())
 }
 
+fn supported_qtype(qtype: QTYPE, rtype: TYPE) -> bool {
+    if let QTYPE::TYPE(t) = qtype {
+        t == rtype
+    } else {
+        qtype == QTYPE::ANY
+    }
+}
+
+fn create_dns_response(
+    redirect_address: IpAddr,
+    request_wrapper: PacketWrapper,
+    request_packet: &WinDivertPacket<'static, NetworkLayer>,
+) -> Result<WinDivertPacket<'static, NetworkLayer>, String> {
+    const DNS_TTL_SECS: u32 = 0x60; // Same as 1.1.1.1
+    let mut dns_response = request_wrapper.dns_wrapper()?.into_reply();
+
+    let rdata = match redirect_address {
+        IpAddr::V4(ip) => RData::A(A {
+            address: ip.to_bits(),
+        }),
+        IpAddr::V6(ip) => RData::AAAA(AAAA {
+            address: ip.to_bits(),
+        }),
+    };
+
+    // Answers will only be provided to whitelisted domains of
+    // supported (standard) queries
+    for question in &dns_response.questions {
+        if (question.qclass != QCLASS::CLASS(CLASS::IN) && question.qclass != QCLASS::ANY)
+            || !supported_qtype(question.qtype, rdata.type_code())
+        {
+            continue;
+        }
+
+        dns_response.answers.push(simple_dns::ResourceRecord {
+            name: question.qname.clone(),
+            class: CLASS::IN,
+            ttl: DNS_TTL_SECS,
+            rdata: rdata.clone(),
+            cache_flush: false,
+        });
+    }
+
+    let mut response_payload = Vec::new();
+    dns_response
+        .write_to(&mut response_payload)
+        .map_err(|e| e.to_string())?;
+
+    let response_wrapper = request_wrapper
+        .with_swapped_addresses()
+        .set_udp_payload(response_payload)
+        .to_owned();
+    let response_data = match response_wrapper.to_packet() {
+        Ok(pkt) => pkt,
+        Err(e) => {
+            log::error!("Failed to write response data: {e}");
+            return Err(e);
+        }
+    };
+
+    create_windivert_packet_from(
+        response_data,
+        request_packet,
+        PacketDirection::Inbound,
+        PacketSource::Imposter,
+    )
+    .map_err(|e| e.to_string())
+}
+
 /// Constructs a packet filter string for capturing DNS packets based on the following criteria:
 /// - The packet is either IPv4 or IPv6.
 /// - The packet's destination UDP port matches the original DNS address port.
@@ -93,7 +164,7 @@ fn generate_packet_filter(cfg: &Config) -> String {
         "(ip or ipv6) and (udp.DstPort == {} && ip.DstAddr != {}) and udp.PayloadLength > {} and udp.Payload[2] < 0x80",
         cfg.original_dns_address.port(),
         cfg.remote_dns_address.ip(),
-        DNS_HEADER_SIZE,
+        MIN_DNS_HEADER_SIZE,
     )
 }
 

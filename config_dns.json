@@ -1,5 +1,7 @@
 {
     "original_dns_address": "1.1.1.1:53",
     "remote_dns_address": "8.8.8.8:53",
-    "hosts_blacklist": ["dontrelayme.com", "metoo.biz"]
+    "hosts_blacklist": ["dontrelayme.com", "metoo.biz"],
+    "redirect_whitelist": ["redirectme.com"],
+    "redirect_address": "127.0.0.2"
 }

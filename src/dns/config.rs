@@ -1,5 +1,5 @@
 use std::fs;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use serde::Deserialize;
 
@@ -8,6 +8,8 @@ pub struct Config {
     pub original_dns_address: SocketAddr,
     pub remote_dns_address: SocketAddr,
     pub hosts_blacklist: Vec<String>,
+    pub redirect_whitelist: Vec<String>,
+    pub redirect_address: IpAddr,
 }
 
 pub fn read_config(path: &str) -> Config {
