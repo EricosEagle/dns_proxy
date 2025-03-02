@@ -36,7 +36,7 @@ The project uses two configuration files:
     "original_dns_address": "127.0.0.1:53",
     "remote_dns_address": "8.8.8.8:53",
     "hosts_blacklist": ["example.com", "test.com"],
-    "redirect_whitelist": ["whitelist.com"],
+    "inject_response_whitelist": ["whitelist.com"],
     "redirect_address": "192.168.1.1"
 }
 ```
@@ -44,7 +44,7 @@ The project uses two configuration files:
 - `original_dns_address`: The original DNS server address.
 - `remote_dns_address`: The remote DNS server address to relay queries.
 - `hosts_blacklist`: List of hosts to be blacklisted.
-- `redirect_whitelist`: List of hosts to be whitelisted for redirection.
+- `inject_response_whitelist`: List of hosts to be whitelisted for redirection.
 - `redirect_address`: The IP address to redirect blacklisted hosts.
 
 ## Usage

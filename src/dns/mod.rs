@@ -22,10 +22,10 @@ const DEFAULT_WINDIVERT_PRIORITY: i16 = 0;
 const MIN_DNS_HEADER_SIZE: usize = 12;
 const MAX_PACKET_SIZE: usize = 65535;
 
-fn hosts_in_blacklist(hosts_blacklist: &[String], questions: &[simple_dns::Question]) -> bool {
+fn hosts_in_list(hosts_list: &[String], questions: &[simple_dns::Question]) -> bool {
     for question in questions {
         let host = &question.qname.to_string();
-        if hosts_blacklist
+        if hosts_list
             .iter()
             .any(|blacklisted_host| blacklisted_host == host)
         {
@@ -240,24 +240,33 @@ async fn process_packet(
         }
     };
 
-    if !hosts_in_blacklist(&cfg.hosts_blacklist, &dns_packet.questions) {
-        log::info!(
-            "Relaying packet to the external DNS server, Source port: {},  hosts: {:?}",
-            packet_wrapper.src_port(),
-            &dns_packet.questions
-        );
-
+    if !hosts_in_list(&cfg.hosts_blacklist, &dns_packet.questions) {
+        let inject_response = hosts_in_list(&cfg.inject_response_whitelist, &dns_packet.questions);
         let remote_address = cfg.remote_dns_address;
+        let redirect_address = cfg.redirect_address;
         tokio::spawn(async move {
-            let pkt = match relay_to_server(remote_address, packet_wrapper, &packet).await {
+            let res = if inject_response {
+                log::info!(
+                    "Injecting DNS Response, Source port: {}",
+                    packet_wrapper.src_port(),
+                );
+                create_dns_response(redirect_address, packet_wrapper, &packet)
+            } else {
+                log::info!(
+                    "Relaying packet to the external DNS server, Source port: {}",
+                    packet_wrapper.src_port(),
+                );
+                relay_to_server(remote_address, packet_wrapper, &packet).await
+            };
+            let pkt = match res {
                 Ok(pkt) => {
                     if log::log_enabled!(log::Level::Debug) {
-                        log::debug!("Relay packet: {:?}", PacketWrapper::new(&pkt.data))
+                        log::debug!("Response packet: {:?}", PacketWrapper::new(&pkt.data))
                     }
                     pkt
                 }
                 Err(e) => {
-                    log::error!("Failed to relay packet: {}", e);
+                    log::error!("Failed to send / create a response packet: {}", e);
                     packet
                 }
             };

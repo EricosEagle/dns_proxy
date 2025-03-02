@@ -8,7 +8,7 @@ pub struct Config {
     pub original_dns_address: SocketAddr,
     pub remote_dns_address: SocketAddr,
     pub hosts_blacklist: Vec<String>,
-    pub redirect_whitelist: Vec<String>,
+    pub inject_response_whitelist: Vec<String>,
     pub redirect_address: IpAddr,
 }
 
