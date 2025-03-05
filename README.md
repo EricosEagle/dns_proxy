@@ -33,19 +33,23 @@ The project uses two configuration files:
 
 ```json
 {
-    "original_dns_address": "127.0.0.1:53",
-    "remote_dns_address": "8.8.8.8:53",
-    "hosts_blacklist": ["example.com", "test.com"],
-    "inject_response_whitelist": ["whitelist.com"],
-    "redirect_address": "192.168.1.1"
+    "dns_port": 53,
+    "qname_blacklist": ["example.com", "test.com"],
+    "dns_proxy_address": "127.0.0.1:53",
+    "inject": {
+        "qname_whitelist": ["whitelist.com"],
+        "response_address": "192.168.1.1",
+        "response_ttl": 300
+    }
 }
 ```
 
-- `original_dns_address`: The original DNS server address.
-- `remote_dns_address`: The remote DNS server address to relay queries.
-- `hosts_blacklist`: List of hosts to be blacklisted.
-- `inject_response_whitelist`: List of hosts to be whitelisted for redirection.
-- `redirect_address`: The IP address to redirect blacklisted hosts.
+- `dns_port`: The port which we will listen for DNS requests on.
+- `qname_blacklist`: List of hosts to be blacklisted.
+- `dns_proxy_address`: The address and port of the DNS server we will forward traffic to.
+- `inject.qname_whitelist`: List of hosts to be whitelisted for redirection.
+- `inject.response_address`: The IP address to redirect whitelisted hosts.
+- `inject.response_ttl`: The TTL for the injected response. (Should be short, so if the whitelist changes programs will revert to using the original IP)
 
 ## Usage
 

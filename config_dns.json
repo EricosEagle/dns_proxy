@@ -1,7 +1,10 @@
 {
-    "original_dns_address": "1.1.1.1:53",
-    "remote_dns_address": "8.8.8.8:53",
-    "hosts_blacklist": ["dontrelayme.com", "metoo.biz"],
-    "inject_response_whitelist": ["redirectme.com"],
-    "redirect_address": "127.0.0.2"
+    "dns_port": 53,
+    "dns_proxy_address": "8.8.8.8:53",
+    "qname_blacklist": ["dontrelayme.com", "metoo.biz"],
+    "inject": {
+        "qname_whitelist": ["redirectme.com"],
+        "response_address": "127.0.0.2",
+        "response_ttl": 3
+    }
 }
