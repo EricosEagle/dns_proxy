@@ -2,7 +2,7 @@ pub mod config;
 mod packet_wrapper;
 mod windivert_packet;
 
-use config::{read_config, Config};
+use config::{read_config, DnsConfig};
 use packet_wrapper::PacketWrapper;
 use simple_dns::rdata::{RData, A, AAAA};
 use simple_dns::{CLASS, QCLASS, QTYPE, TYPE};
@@ -92,10 +92,10 @@ fn supported_qtype(qtype: QTYPE, rtype: TYPE) -> bool {
 
 fn create_dns_response(
     redirect_address: IpAddr,
+    redirect_ttl: u32,
     request_wrapper: PacketWrapper,
     request_packet: &WinDivertPacket<'static, NetworkLayer>,
 ) -> Result<WinDivertPacket<'static, NetworkLayer>, String> {
-    const DNS_TTL_SECS: u32 = 0x60; // Same as 1.1.1.1
     let mut dns_response = request_wrapper.dns_wrapper()?.into_reply();
 
     let rdata = match redirect_address {
@@ -119,7 +119,7 @@ fn create_dns_response(
         dns_response.answers.push(simple_dns::ResourceRecord {
             name: question.qname.clone(),
             class: CLASS::IN,
-            ttl: DNS_TTL_SECS,
+            ttl: redirect_ttl,
             rdata: rdata.clone(),
             cache_flush: false,
         });
@@ -159,18 +159,18 @@ fn create_dns_response(
 /// - The third byte of the UDP payload has its most significant bit (0x80) unset, indicating a DNS query (not a response).
 ///
 /// Note: Bitwise operators aren't supported by the windivert filter syntax, so comparison operators are used instead
-fn generate_packet_filter(cfg: &Config) -> String {
+fn generate_packet_filter(cfg: &DnsConfig) -> String {
     format!(
         "(ip or ipv6) and (udp.DstPort == {} && ip.DstAddr != {}) and udp.PayloadLength > {} and udp.Payload[2] < 0x80",
-        cfg.original_dns_address.port(),
-        cfg.remote_dns_address.ip(),
+        cfg.dns_port,
+        cfg.dns_proxy_address.ip(),
         MIN_DNS_HEADER_SIZE,
     )
 }
 
 #[tokio::main]
 pub async fn main() {
-    let cfg: Config = read_config(CONFIG_PATH); // TODO: Find way to nest all configs in one file
+    let cfg = read_config(CONFIG_PATH); // TODO: Find way to nest all configs in one file
     let packet_filter = generate_packet_filter(&cfg);
     log::trace!("Packet filter: {}", packet_filter);
 
@@ -189,7 +189,7 @@ pub async fn main() {
     main_loop(cfg, windvt).await;
 }
 
-async fn main_loop(cfg: Config, windvt: WinDivert<NetworkLayer>) {
+async fn main_loop(cfg: DnsConfig, windvt: WinDivert<NetworkLayer>) {
     let windvt = Arc::new(Mutex::new(windvt));
     loop {
         let mut buf = [0u8; MAX_PACKET_SIZE];
@@ -203,16 +203,16 @@ async fn main_loop(cfg: Config, windvt: WinDivert<NetworkLayer>) {
 
         let packet = packet.into_owned();
 
-        if let Err(e) = process_packet(&cfg, windvt.clone(), packet).await {
+        if let Err(e) = process_packet(windvt.clone(), packet, &cfg).await {
             log::error!("Error processing packet: {}", e);
         }
     }
 }
 
 async fn process_packet(
-    cfg: &Config,
     windvt: Arc<Mutex<WinDivert<NetworkLayer>>>,
     packet: WinDivertPacket<'static, NetworkLayer>,
+    cfg: &DnsConfig,
 ) -> Result<(), String> {
     let packet_wrapper = match PacketWrapper::new(&packet.data) {
         Ok(parsed_packet) => parsed_packet,
@@ -240,23 +240,24 @@ async fn process_packet(
         }
     };
 
-    if !hosts_in_list(&cfg.hosts_blacklist, &dns_packet.questions) {
-        let inject_response = hosts_in_list(&cfg.inject_response_whitelist, &dns_packet.questions);
-        let remote_address = cfg.remote_dns_address;
-        let redirect_address = cfg.redirect_address;
+    if !hosts_in_list(&cfg.qname_blacklist, &dns_packet.questions) {
+        let inject_response = hosts_in_list(&cfg.inject.qname_whitelist, &dns_packet.questions);
+        let proxy_address = cfg.dns_proxy_address;
+        let inject_address = cfg.inject.response_address;
+        let ttl = cfg.inject.response_ttl;
         tokio::spawn(async move {
             let res = if inject_response {
                 log::info!(
                     "Injecting DNS Response, Source port: {}",
                     packet_wrapper.src_port(),
                 );
-                create_dns_response(redirect_address, packet_wrapper, &packet)
+                create_dns_response(inject_address, ttl, packet_wrapper, &packet)
             } else {
                 log::info!(
                     "Relaying packet to the external DNS server, Source port: {}",
                     packet_wrapper.src_port(),
                 );
-                relay_to_server(remote_address, packet_wrapper, &packet).await
+                relay_to_server(proxy_address, packet_wrapper, &packet).await
             };
             let pkt = match res {
                 Ok(pkt) => {
