@@ -13,6 +13,7 @@ use windivert_packet::{create_windivert_packet_from, PacketDirection, PacketSour
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
@@ -22,17 +23,17 @@ const DEFAULT_WINDIVERT_PRIORITY: i16 = 0;
 const MIN_DNS_HEADER_SIZE: usize = 12;
 const MAX_PACKET_SIZE: usize = 65535;
 
-fn hosts_in_list(hosts_list: &[String], questions: &[simple_dns::Question]) -> bool {
+fn hosts_in_list(hosts_list: &[String], questions: &[simple_dns::Question]) -> Option<String> {
     for question in questions {
-        let host = &question.qname.to_string();
+        let host = question.qname.to_string();
         if hosts_list
             .iter()
-            .any(|blacklisted_host| blacklisted_host == host)
+            .any(|blacklisted_host| blacklisted_host == &host)
         {
-            return true;
+            return Some(host);
         }
     }
-    false
+    None
 }
 
 async fn send_dns_query(dest_address: SocketAddr, query: &[u8]) -> std::io::Result<Vec<u8>> {
@@ -191,6 +192,8 @@ pub async fn main() {
 
 async fn main_loop(cfg: DnsConfig, windvt: WinDivert<NetworkLayer>) {
     let windvt = Arc::new(Mutex::new(windvt));
+    let cooldown_hosts: Vec<(String, Instant)> = Vec::new();
+    let cooldown_hosts = Arc::new(Mutex::new(cooldown_hosts));
     loop {
         let mut buf = [0u8; MAX_PACKET_SIZE];
         let packet = match windvt.lock().await.recv(Some(&mut buf)) {
@@ -203,7 +206,7 @@ async fn main_loop(cfg: DnsConfig, windvt: WinDivert<NetworkLayer>) {
 
         let packet = packet.into_owned();
 
-        if let Err(e) = process_packet(windvt.clone(), packet, &cfg).await {
+        if let Err(e) = process_packet(windvt.clone(), packet, &cfg, cooldown_hosts.clone()).await {
             log::error!("Error processing packet: {}", e);
         }
     }
@@ -213,6 +216,7 @@ async fn process_packet(
     windvt: Arc<Mutex<WinDivert<NetworkLayer>>>,
     packet: WinDivertPacket<'static, NetworkLayer>,
     cfg: &DnsConfig,
+    cooldown_hosts: Arc<Mutex<Vec<(String, Instant)>>>,
 ) -> Result<(), String> {
     let packet_wrapper = match PacketWrapper::new(&packet.data) {
         Ok(parsed_packet) => parsed_packet,
@@ -240,18 +244,36 @@ async fn process_packet(
         }
     };
 
-    if !hosts_in_list(&cfg.qname_blacklist, &dns_packet.questions) {
-        let inject_response = hosts_in_list(&cfg.inject.qname_whitelist, &dns_packet.questions);
+    if hosts_in_list(&cfg.qname_blacklist, &dns_packet.questions).is_none() {
+        let whitelisted_host = hosts_in_list(&cfg.inject.qname_whitelist, &dns_packet.questions);
+        let inject_response = if let Some(ref host) = whitelisted_host {
+            // Remove all expired cooldowns
+            let mut ch = cooldown_hosts.lock().await;
+            ch.retain(|t| {
+                Instant::now().duration_since(t.1)
+                    < Duration::from_secs(cfg.inject.response_ttl_secs as u64)
+            });
+
+            ch.iter().any(|t| t.0 == *host)
+        } else {
+            false
+        };
+
         let proxy_address = cfg.dns_proxy_address;
         let inject_address = cfg.inject.response_address;
-        let ttl = cfg.inject.response_ttl;
+        let ttl = cfg.inject.response_ttl_secs;
         tokio::spawn(async move {
             let res = if inject_response {
                 log::info!(
                     "Injecting DNS Response, Source port: {}",
                     packet_wrapper.src_port(),
                 );
-                create_dns_response(inject_address, ttl, packet_wrapper, &packet)
+                let res = create_dns_response(inject_address, ttl, packet_wrapper, &packet);
+                if res.is_ok() {
+                    let mut ch = cooldown_hosts.lock().await;
+                    ch.push((whitelisted_host.unwrap(), Instant::now()));
+                }
+                res
             } else {
                 log::info!(
                     "Relaying packet to the external DNS server, Source port: {}",

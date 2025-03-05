@@ -7,7 +7,9 @@ use serde::Deserialize;
 pub struct InjectConfig {
     pub qname_whitelist: Vec<String>,
     pub response_address: IpAddr,
-    pub response_ttl: u32,
+
+    /// Used both as response ttl and cooldown length
+    pub response_ttl_secs: u32,
 }
 
 #[derive(Clone, Debug, Deserialize)]
