@@ -254,7 +254,9 @@ async fn process_packet(
                     < Duration::from_secs(cfg.inject.response_ttl_secs as u64)
             });
 
-            ch.iter().any(|t| t.0 == *host)
+            log::debug!("Clearing expired cooldowns. Current list: {:?}", ch);
+
+            ch.iter().all(|t| t.0 != *host)
         } else {
             false
         };
@@ -271,7 +273,9 @@ async fn process_packet(
                 let res = create_dns_response(inject_address, ttl, packet_wrapper, &packet);
                 if res.is_ok() {
                     let mut ch = cooldown_hosts.lock().await;
-                    ch.push((whitelisted_host.unwrap(), Instant::now()));
+                    let host = whitelisted_host.unwrap();
+                    log::debug!("Adding {} to cooldowns", host);
+                    ch.push((host, Instant::now()));
                 }
                 res
             } else {
@@ -295,8 +299,19 @@ async fn process_packet(
             };
 
             match windvt.lock().await.send(&pkt) {
-                Ok(_) => log::info!("Successfully relayed packet"),
-                Err(e) => log::error!("Failed to send relay packet: {}", e),
+                Ok(_) => log::info!(
+                    "Successfully {} packet",
+                    if inject_response {
+                        "injected"
+                    } else {
+                        "relayed"
+                    }
+                ),
+                Err(e) => log::error!(
+                    "Failed to send {} packet: {}",
+                    if inject_response { "inject" } else { "relay" },
+                    e
+                ),
             }
         });
         return Ok(());

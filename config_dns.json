@@ -3,8 +3,8 @@
     "dns_proxy_address": "8.8.8.8:53",
     "qname_blacklist": ["dontrelayme.com", "metoo.biz"],
     "inject": {
-        "qname_whitelist": ["redirectme.com"],
+        "qname_whitelist": ["redirectme.com", "redirectme.net", "redirectme.biz"],
         "response_address": "127.0.0.2",
-        "response_ttl": 3
+        "response_ttl_secs": 3
     }
 }
